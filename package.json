@@ -1,0 +1,27 @@
+{
+  "name": "polybot",
+  "version": "1.0.0",
+  "description": "Modular prediction market trading bot for Polymarket",
+  "main": "dist/main.js",
+  "scripts": {
+    "start":     "ts-node --transpile-only src/main.ts",
+    "start:dry": "DRY_RUN=true ts-node --transpile-only src/main.ts",
+    "dev":       "ts-node --transpile-only src/main.ts",
+    "setup":     "ts-node --transpile-only setup.ts",
+    "build":     "tsc",
+    "test":      "echo \"No tests configured yet\" && exit 0"
+  },
+  "keywords": ["polymarket", "trading-bot", "prediction-market", "polygon", "typescript"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@polymarket/clob-client": "^5.8.0",
+    "@types/node": "^25.5.0",
+    "dotenv": "^17.3.1",
+    "ethers": "^5.8.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  }
+}
