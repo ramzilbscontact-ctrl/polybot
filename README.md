@@ -9,9 +9,10 @@
 [![Polygon](https://img.shields.io/badge/Network-Polygon_Mainnet-8247E5?logo=polygon&logoColor=white)](https://polygon.technology)
 [![Polymarket](https://img.shields.io/badge/Market-Polymarket_CLOB-00C2FF)](https://polymarket.com)
 [![PM2](https://img.shields.io/badge/Daemon-PM2-2B037A?logo=pm2)](https://pm2.keymetrics.io)
+[![Telegram](https://img.shields.io/badge/Alerts-Telegram-26A5E4?logo=telegram&logoColor=white)](https://telegram.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
 
-*Automatically scans Polymarket for high-probability opportunities across Crypto, Politics, Sports & Pop Culture — with real-time price validation, structured logging, and daemon deployment.*
+*Automatically scans Polymarket for high-probability opportunities across Crypto, Politics, Sports & Pop Culture — with real-time price validation, anti-slippage protection, limit order watchdog, Telegram alerts, and daemon deployment.*
 
 ---
 
@@ -22,12 +23,14 @@
 - [Overview](#-overview)
 - [Architecture](#-architecture)
 - [Strategy](#-strategy)
+- [Execution Flow](#-execution-flow)
 - [Project Structure](#-project-structure)
 - [Prerequisites](#-prerequisites)
 - [Installation](#-installation)
 - [Configuration](#-configuration)
 - [Running the Bot](#-running-the-bot)
 - [Monitoring & Logs](#-monitoring--logs)
+- [Telegram Notifications](#-telegram-notifications)
 - [Safety Features](#-safety-features)
 - [API Reference](#-api-reference)
 - [Disclaimer](#-disclaimer)
@@ -39,9 +42,9 @@
 Polybot is a **modular, production-ready** trading bot for [Polymarket](https://polymarket.com) — the world's largest prediction market platform. It scans the CLOB (Central Limit Order Book) API continuously, identifies high-probability opportunities, validates them against live market data, and executes orders automatically.
 
 ```
-Market Scan  →  Signal Detection  →  Price Validation  →  Order Execution
-    ↑                                                            |
-    └────────────────────── 60s loop ───────────────────────────┘
+Market Scan  →  Signal Detection  →  Price Validation  →  Anti-Slippage  →  Order Execution
+    ↑                                                                               |
+    └──────────────────────────────── 60s loop ─────────────────────────────────────┘
 ```
 
 ### ✨ Key Features
@@ -51,8 +54,10 @@ Market Scan  →  Signal Detection  →  Price Validation  →  Order Execution
 | 🌍 **Multi-domain** | Crypto · Politics · Sports · Pop Culture |
 | 🔁 **Auto-retry** | Exponential backoff on all API calls |
 | 💰 **Price validation** | Real-time Binance → CoinGecko fallback |
-| 🛡️ **Safety guards** | Stop-loss · max exposure · safety margin |
+| 🛡️ **Anti-slippage** | Live bestAsk re-checked before every order (2% tolerance) |
+| ⏱️ **Order watchdog** | 5s limit order timeout + automatic cancellation |
 | 📊 **Structured logs** | Winston · daily rotation · JSON format |
+| 📱 **Telegram alerts** | Real-time notifications: signals, fills, cancels, stop-loss |
 | 👻 **Daemon mode** | PM2 · auto-restart · survives reboots |
 | 🧪 **Dry-run mode** | Simulate without placing real orders |
 
@@ -63,36 +68,36 @@ Market Scan  →  Signal Detection  →  Price Validation  →  Order Execution
 Polybot follows a clean **Connector / Strategy / Executor** pattern inspired by institutional algo-trading frameworks:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         main.ts                             │
-│              (Orchestrator — wires everything)              │
-└──────────┬──────────────────┬───────────────────────────────┘
-           │                  │
-    ┌──────▼──────┐    ┌──────▼──────────────────────┐
-    │  Connector  │    │         Strategy             │
-    │             │◄───│                              │
-    │ Polymarket  │    │  HighProbStrategy.ts         │
-    │ CLOB API    │    │  - Multi-domain scanner      │
-    │             │    │  - Signal detection          │
-    │ + Retry     │    │  - Domain-specific validate  │
-    │ + Timeout   │    └──────────────┬───────────────┘
-    └──────┬──────┘                   │
-           │                   ┌──────▼──────┐
-           │                   │  Price Feed │
-           │                   │             │
-           │                   │  Binance    │
-           │                   │     ↓       │
-           │                   │  CoinGecko  │
-           │                   │  (fallback) │
-           │                   └─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                           main.ts                               │
+│                (Orchestrator — wires everything)                │
+└──────────┬──────────────────┬──────────────────┬────────────────┘
+           │                  │                  │
+    ┌──────▼──────┐    ┌──────▼──────────┐  ┌───▼──────────────┐
+    │  Connector  │    │    Strategy      │  │ TelegramNotifier │
+    │             │◄───│                  │  │                  │
+    │ Polymarket  │    │ HighProbStrategy │  │ Startup alerts   │
+    │ CLOB API    │    │ - Multi-domain   │  │ Signal alerts    │
+    │             │    │ - Signal detect  │  │ Fill alerts      │
+    │ + Retry     │    │ - Domain valid.  │  │ Cancel alerts    │
+    │ + Timeout   │    └──────────┬───────┘  │ Stop-loss alerts │
+    └──────┬──────┘               │          └──────────────────┘
+           │               ┌──────▼──────┐
+           │               │  Price Feed │
+           │               │  Binance    │
+           │               │     ↓       │
+           │               │  CoinGecko  │
+           │               │  (fallback) │
+           │               └─────────────┘
     ┌──────▼──────────────────────────────────┐
     │              Executor                   │
     │                                         │
     │  OrderExecutor.ts                       │
-    │  - Balance check before every trade     │
-    │  - Stop-loss enforcement                │
-    │  - Max simultaneous trades limit        │
-    │  - Dry-run mode support                 │
+    │  - Guard 1: Balance check               │
+    │  - Guard 2: Global stop-loss            │
+    │  - Guard 3: Anti-slippage (live ask)    │
+    │  - Limit Order GTC placement            │
+    │  - 5s watchdog + auto-cancel            │
     └──────────────────────────────────────────┘
            │
     ┌──────▼──────┐
@@ -142,6 +147,47 @@ Filter Pipeline:
 
 ---
 
+## ⚡ Execution Flow
+
+Every signal goes through a 3-guard pipeline before an order is placed:
+
+```
+Signal reçu
+  │
+  ├─ Guard 1 : Solde USDC.e suffisant ?
+  │              Non → SKIP (log warning)
+  │
+  ├─ Guard 2 : Stop-loss global atteint ?
+  │              Oui → HALT (bot suspendu + Telegram alert)
+  │
+  ├─ Guard 3 : Anti-slippage — re-vérifie le bestAsk live
+  │              |liveAsk - scanPrice| / scanPrice > 2% → ANNULÉ
+  │              OK → on continue
+  │
+  ├─ Placement Limit Order GTC au prix exact du scan
+  │
+  └─ Watchdog 5 secondes (polling 800ms)
+        ├─ Ordre matched  → ✅ succès + Telegram "REMPLI"
+        ├─ Ordre live     → ❌ cancelOrder() + Telegram "ANNULÉ"
+        └─ Ordre annulé   → log + on passe
+```
+
+### Anti-Slippage Logic
+
+```typescript
+const liveAsk  = await connector.getLiveBestAsk(tokenId);
+const driftPct = Math.abs(liveAsk - scanPrice) / scanPrice;
+
+if (driftPct > 0.02) {
+  // ⛔ Prix a bougé de plus de 2% depuis le scan — on n'entre pas
+  return;
+}
+```
+
+This prevents entering positions where the market has already moved against you between scan and execution.
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -157,13 +203,14 @@ polybot/
 │   │   └── HighProbStrategy.ts      # Signal detection & validation
 │   │
 │   ├── executor/
-│   │   └── OrderExecutor.ts         # Order placement & guardrails
+│   │   └── OrderExecutor.ts         # Order placement, guards & watchdog
 │   │
 │   ├── price/
 │   │   └── PriceFeed.ts             # Live prices (Binance + CoinGecko)
 │   │
 │   └── utils/
-│       └── logger.ts                # Winston structured logging
+│       ├── logger.ts                # Winston structured logging
+│       └── TelegramNotifier.ts      # Real-time Telegram alerts
 │
 ├── logs/                            # Auto-created at runtime
 │   ├── polybot-YYYY-MM-DD.log       # All events (JSON, rotated daily)
@@ -188,6 +235,7 @@ polybot/
 | Polygon wallet | — | MetaMask or similar |
 | Alchemy account | — | Free tier works |
 | Polymarket account | — | L2 keys via `setup.ts` |
+| Telegram Bot | — | Optional — create via @BotFather |
 
 ---
 
@@ -195,7 +243,7 @@ polybot/
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/polybot.git
+git clone https://github.com/ramzilbscontact-ctrl/polybot.git
 cd polybot
 
 # 2. Install dependencies
@@ -227,19 +275,31 @@ ALCHEMY_URL=<https://...>          # Polygon RPC endpoint
 CLOB_API_KEY=
 CLOB_SECRET=
 CLOB_PASSPHRASE=
+
+# Telegram (optional — create a bot via @BotFather)
+TELEGRAM_BOT_TOKEN=<bot_token>     # Format: 123456:ABC-xyz...
+TELEGRAM_CHAT_ID=<chat_id>         # Your personal or group chat ID
 ```
 
 ### Strategy Tuning
 
 ```bash
-YES_MIN=0.88        # Lower = more opportunities, higher risk
-YES_MAX=0.94        # Upper bound on YES price
-STAKE_USDC=0.80     # Fixed stake per trade
-EXPIRY_MAX_H=48     # Scan markets expiring within 48h
-CRYPTO_BUFFER=60    # Minimum $60 buffer above bet threshold
-MAX_TRADES=3        # Max concurrent open positions
-MAX_LOSS=2.00       # Global stop-loss in USDC.e
-DRY_RUN=false       # true = paper trading mode
+YES_MIN=0.88           # Lower = more opportunities, higher risk
+YES_MAX=0.94           # Upper bound on YES price
+STAKE_USDC=0.80        # Fixed stake per trade
+EXPIRY_MAX_H=48        # Scan markets expiring within 48h
+CRYPTO_BUFFER=60       # Minimum $60 buffer above bet threshold
+MAX_TRADES=3           # Max concurrent open positions
+MAX_LOSS=2.00          # Global stop-loss in USDC.e
+DRY_RUN=false          # true = paper trading mode
+```
+
+### Anti-Slippage & Order Timing
+
+```bash
+MAX_SLIPPAGE=0.02      # 2% max drift between scan price and live ask
+ORDER_TIMEOUT_MS=5000  # Cancel limit order after 5 seconds if unfilled
+POLL_INTERVAL_MS=800   # Check order status every 800ms
 ```
 
 ### Generate Polymarket API Keys
@@ -338,23 +398,67 @@ pm2 logs polybot --lines 100
 
 ---
 
+## 📱 Telegram Notifications
+
+Polybot sends real-time alerts to your Telegram account for every meaningful event:
+
+| Event | Trigger | Message |
+|---|---|---|
+| 🟢 **Startup** | Bot starts | Version, config summary, wallet address |
+| 🎯 **Signal** | Market opportunity found | Domain, question, price, expiry, potential gain |
+| ⛔ **Slippage** | Price drifted > 2% | Scan price vs live ask, drift % |
+| ✅ **Filled** | Order matched | Fill price, cost, market question |
+| ❌ **Cancelled** | Watchdog timeout | Order ID, reason |
+| 🛑 **Stop-Loss** | Global loss limit hit | Total loss, configured max |
+
+### Setup
+
+1. Open Telegram → search **@BotFather** → `/newbot`
+2. Copy the token (format: `123456:ABC-xyz...`)
+3. Start a chat with your new bot
+4. Add to `.env`:
+   ```bash
+   TELEGRAM_BOT_TOKEN=your_token_here
+   TELEGRAM_CHAT_ID=your_chat_id_here
+   ```
+
+> **Finding your Chat ID**: Message [@userinfobot](https://t.me/userinfobot) on Telegram — it replies with your numeric ID.
+
+### Example Telegram Message
+
+```
+🎯 Signal détecté
+
+📌 Will BTC close above $85,000 today?
+🌐 Crypto
+💵 Prix YES : 0.91¢
+⏱ Expire dans : 23 min
+📊 Mise : 0.784 USDC.e → 0.862 parts
+💰 Gain potentiel : +0.078 USDC.e
+```
+
+---
+
 ## 🛡️ Safety Features
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                       SAFETY LAYERS                             │
-├─────────────────────────────────────────────────────────────────┤
-│ 1. Balance check     → Aborts if USDC.e < stake before trade    │
-│ 2. Safety margin     → Effective stake = stake × 0.98           │
-│ 3. Max open trades   → Never more than 3 concurrent positions   │
-│ 4. Global stop-loss  → Bot halts if total loss ≥ 2.00 USDC.e   │
-│ 5. Crypto buffer     → Only enters if real price $60+ above     │
-│                         the bet threshold (Binance verified)    │
-│ 6. Liquidity filter  → Min 500 USDC CLOB depth required         │
-│ 7. Dry-run mode      → Full simulation without real orders      │
-│ 8. Retry + timeout   → 4 retries, 12s timeout per API call      │
-│ 9. Graceful shutdown → SIGTERM/SIGINT caught, stats logged      │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         SAFETY LAYERS                               │
+├─────────────────────────────────────────────────────────────────────┤
+│  1. Balance check      → Aborts if USDC.e < stake before trade      │
+│  2. Safety margin      → Effective stake = stake × 0.98             │
+│  3. Max open trades    → Never more than 3 concurrent positions      │
+│  4. Global stop-loss   → Bot halts if total loss ≥ 2.00 USDC.e     │
+│  5. Crypto buffer      → Only enters if real price $60+ above       │
+│                           the bet threshold (Binance verified)       │
+│  6. Liquidity filter   → Min 500 USDC CLOB depth required           │
+│  7. Anti-slippage      → Rejects order if live ask drifted > 2%     │
+│                           from scan price (Guard 3 pre-flight)       │
+│  8. Order watchdog     → Cancels unfilled limit orders after 5s     │
+│  9. Dry-run mode       → Full simulation without real orders         │
+│ 10. Retry + timeout    → 4 retries, 12s timeout per API call        │
+│ 11. Graceful shutdown  → SIGTERM/SIGINT caught, stats + Telegram     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -367,10 +471,13 @@ pm2 logs polybot --lines 100
 const connector = new PolymarketConnector(privateKey, alchemyUrl, apiCreds);
 await connector.connect();
 
-await connector.getGammaMarkets();           // Fetch active markets
-await connector.getOrderBook(tokenId);       // Order book depth
+await connector.getGammaMarkets();                    // Fetch active markets
+await connector.getOrderBook(tokenId);                // Order book depth
 await connector.placeOrder({ tokenId, price, size, side });
-await connector.getUsdcBalance();            // USDC.e balance
+await connector.getUsdcBalance();                     // USDC.e balance
+await connector.getLiveBestAsk(tokenId);              // Live ask (anti-slippage)
+await connector.getOrderStatus(orderId);              // 'live' | 'matched' | 'cancelled' | 'unknown'
+await connector.cancelOrder(orderId);                 // Cancel + returns boolean
 ```
 
 ### `HighProbStrategy`
@@ -379,26 +486,47 @@ await connector.getUsdcBalance();            // USDC.e balance
 const strategy = new HighProbStrategy(connector, {
   yesMin: 0.88, yesMax: 0.94, stakeUsdc: 0.80, ...
 });
-const signals = await strategy.scan();  // Returns MarketSignal[]
-strategy.markFired(conditionId);        // Prevent duplicate trades
+const signals = await strategy.scan();   // Returns MarketSignal[]
+strategy.markFired(conditionId);         // Prevent duplicate trades
 ```
 
 ### `OrderExecutor`
 
 ```typescript
 const executor = new OrderExecutor(connector, strategy, {
-  maxOpenTrades: 3, maxTotalLoss: 2.00, dryRun: false
-});
+  maxOpenTrades:       3,
+  maxTotalLoss:        2.00,
+  dryRun:              false,
+  maxSlippagePct:      0.02,    // 2% tolerance
+  limitOrderTimeoutMs: 5_000,   // Cancel after 5s
+  pollIntervalMs:      800,     // Check status every 800ms
+}, telegramNotifier);
+
 await executor.processSignals(signals);
-console.log(executor.stats);  // { tradeCount, openTrades, totalLoss, stopped }
+console.log(executor.stats);
+// → { tradeCount, openTrades, cancelCount, totalLoss, stopped }
+```
+
+### `TelegramNotifier`
+
+```typescript
+const tg = new TelegramNotifier(botToken, chatId);
+
+await tg.notifyStartup(config);
+await tg.notifySignal(signal);
+await tg.notifySlippage(signal, liveAsk, driftPct);
+await tg.notifyFilled(signal, orderId, fillPrice);
+await tg.notifyCancelled(signal, orderId, reason);
+await tg.notifyStopLoss(totalLoss, maxLoss);
+await tg.notifyTest();  // Connectivity check
 ```
 
 ### `PriceFeed`
 
 ```typescript
-const { price, source } = await getPrice('BTC');   // Binance → CoinGecko
-const ticker    = detectTicker('Will BTC hit $90k?');   // → 'BTC'
-const threshold = parseThreshold('Will BTC hit $90,000?'); // → 90000
+const { price, source } = await getPrice('BTC');              // Binance → CoinGecko
+const ticker    = detectTicker('Will BTC hit $90k?');         // → 'BTC'
+const threshold = parseThreshold('Will BTC hit $90,000?');    // → 90000
 ```
 
 ---
@@ -420,6 +548,6 @@ const threshold = parseThreshold('Will BTC hit $90,000?'); // → 90000
 
 <div align="center">
 
-Built with ❤️ using [Polymarket CLOB API](https://docs.polymarket.com) · [ethers.js](https://docs.ethers.org) · [Winston](https://github.com/winstonjs/winston) · [PM2](https://pm2.keymetrics.io)
+Built with ❤️ using [Polymarket CLOB API](https://docs.polymarket.com) · [ethers.js](https://docs.ethers.org) · [Winston](https://github.com/winstonjs/winston) · [PM2](https://pm2.keymetrics.io) · [Telegram Bot API](https://core.telegram.org/bots/api)
 
 </div>
