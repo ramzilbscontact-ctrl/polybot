@@ -33,6 +33,12 @@ export interface OrderResult {
   status:  string;
 }
 
+export type OrderStatus =
+  | 'live'       // Dans le carnet, en attente de match
+  | 'matched'    // Rempli (partiellement ou totalement)
+  | 'cancelled'  // Annulé
+  | 'unknown';   // Réponse non reconnue
+
 export class PolymarketConnector {
   private client!: ClobClient;
   private wallet!: ethers.Wallet;
@@ -160,6 +166,56 @@ export class PolymarketConnector {
     const status  = (resp as any).status  ?? 'submitted';
     log.info('Ordre accepté', { orderId, status });
     return { orderId, status };
+  }
+
+  // ── Meilleur ask live (anti-slippage) ────────────────────────
+  async getLiveBestAsk(tokenId: string): Promise<number | null> {
+    this.assertReady();
+    try {
+      const book = await this.withRetry(
+        () => this.client.getOrderBook(tokenId), 'getLiveBestAsk'
+      );
+      const asks = (book as any).asks ?? [];
+      if (!asks.length) return null;
+      // Le CLOB trie les asks du plus bas au plus haut
+      return parseFloat(asks[0].price);
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Statut d'un ordre ─────────────────────────────────────────
+  async getOrderStatus(orderId: string): Promise<OrderStatus> {
+    this.assertReady();
+    try {
+      const order = await this.withRetry(
+        () => this.client.getOrder(orderId), 'getOrderStatus'
+      ) as any;
+      const s = (order?.status ?? '').toLowerCase();
+      if (s === 'live')      return 'live';
+      if (s === 'matched')   return 'matched';
+      if (s === 'cancelled') return 'cancelled';
+      return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  // ── Annulation d'un ordre ────────────────────────────────────
+  async cancelOrder(orderId: string): Promise<boolean> {
+    this.assertReady();
+    try {
+      await this.withRetry(
+        () => this.client.cancelOrder({ orderID: orderId }), 'cancelOrder'
+      );
+      log.info('Ordre annulé', { orderId });
+      return true;
+    } catch (e: any) {
+      log.warn('Échec annulation ordre', {
+        orderId, error: e.message?.split('\n')[0],
+      });
+      return false;
+    }
   }
 
   // ── Solde USDC.e ─────────────────────────────────────────────
