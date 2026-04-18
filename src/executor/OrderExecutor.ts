@@ -17,6 +17,7 @@
  *           ├─ Ordre en attente (live) → ❌ cancelOrder() + log slippage
  *           └─ Ordre déjà annulé       → log + on passe
  */
+import { EventEmitter }           from 'events';
 import { getLogger }             from '../utils/logger';
 import type { PolymarketConnector } from '../connectors/PolymarketConnector';
 import type { HighProbStrategy, MarketSignal } from '../strategies/HighProbStrategy';
@@ -63,7 +64,7 @@ interface PaperTrade {
   pnl:        number | null;
 }
 
-export class OrderExecutor {
+export class OrderExecutor extends EventEmitter {
   private readonly cfg: ExecutorConfig;
   private openTrades   = 0;
   private totalLoss    = 0;
@@ -82,6 +83,7 @@ export class OrderExecutor {
     private readonly strategy:  HighProbStrategy,
     config: Partial<ExecutorConfig> = {}
   ) {
+    super();
     this.cfg = { ...DEFAULT_EXECUTOR, ...config };
 
     log.info('OrderExecutor initialisé', {
@@ -145,6 +147,7 @@ export class OrderExecutor {
         totalLoss: this.totalLoss, max: this.cfg.maxTotalLoss,
       });
       this.stopped = true;
+      this.emit('stop-loss', { totalLoss: this.totalLoss, maxLoss: this.cfg.maxTotalLoss });
       return;
     }
 
@@ -205,6 +208,11 @@ export class OrderExecutor {
       this.strategy.markFired(signal.conditionId);
 
       const potentialWin = ((1 - yesPrice) * shares).toFixed(4);
+      this.emit('paper:opened', {
+        tradeId, domain, question: signal.question,
+        entryPrice: yesPrice, shares, stake: stakeUsdc,
+        minsLeft, potentialWin: parseFloat(potentialWin),
+      });
       log.info(`Trade ${tradeId} [PAPER] — 📋 Position ouverte`, {
         domain,
         question:     label,
@@ -309,6 +317,16 @@ export class OrderExecutor {
       this.paperPnl += pnl;
       if (won) this.paperWins++; else this.paperLosses++;
       this.openTrades = Math.max(0, this.openTrades - 1);
+      this.emit('paper:resolved', {
+        tradeId:    trade.tradeId,
+        won,        domain: trade.domain,
+        question:   trade.question,
+        entryPrice: trade.entryPrice,
+        pnl,
+        totalPnl:   this.paperPnl,
+        wins:       this.paperWins,
+        losses:     this.paperLosses,
+      });
 
       const resolved = this.paperTrades.filter(t => t.resolved).length;
       const winRate  = resolved > 0
