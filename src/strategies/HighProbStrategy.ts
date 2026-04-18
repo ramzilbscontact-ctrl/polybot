@@ -11,6 +11,7 @@
 import { getLogger }      from '../utils/logger';
 import { getPrice, detectTicker, parseThreshold } from '../price/PriceFeed';
 import type { PolymarketConnector } from '../connectors/PolymarketConnector';
+import type { CachedMarket }        from '../feeds/MarketCache';
 
 const log = getLogger('HighProbStrategy');
 
@@ -206,4 +207,40 @@ export class HighProbStrategy {
   markFired(conditionId: string) { this.firedIds.add(conditionId); }
 
   get config() { return { ...this.cfg }; }
+
+  // ── Hot path WebSocket : signal depuis cache ──────────────────
+  //
+  // Appelé à chaque price_update WS — aucun appel HTTP.
+  // La validation domaine (buffer crypto, liquidité) a déjà été faite
+  // lors du scan HTTP initial (CachedMarket.validated = true).
+  buildSignalFromCache(market: CachedMarket, livePrice: number): MarketSignal | null {
+    if (!market.validated)                               return null;
+    if (livePrice < this.cfg.yesMin || livePrice > this.cfg.yesMax) return null;
+    if (this.firedIds.has(market.conditionId))           return null;
+
+    const now    = Date.now();
+    const left   = Date.parse(market.endDate) - now;
+    const minMs  = this.cfg.expiryMinMins  * 60_000;
+    const maxMs  = this.cfg.expiryMaxHours * 3_600_000;
+    if (left < minMs || left > maxMs) return null;
+
+    const effectiveStake = parseFloat(
+      (this.cfg.stakeUsdc * (1 - this.cfg.safetyMargin)).toFixed(4),
+    );
+    const shares   = parseFloat((effectiveStake / livePrice).toFixed(2));
+    const minsLeft = Math.round(left / 60_000);
+
+    return {
+      conditionId: market.conditionId,
+      question:    market.question,
+      domain:      market.domain,
+      yesPrice:    livePrice,
+      tokenId:     market.tokenId,
+      minsLeft,
+      liquidity:   market.liquidity,
+      stakeUsdc:   effectiveStake,
+      shares,
+      reasoning:   `[WS] ${market.reasoning} → livePrice=${livePrice}`,
+    };
+  }
 }
