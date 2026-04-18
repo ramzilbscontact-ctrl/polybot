@@ -1,38 +1,34 @@
 /**
- * main.ts — Orchestrateur event-driven (Stack 1)
+ * main.ts — Orchestrateur Stack 2
  *
- * Architecture :
+ * Flux de données :
  *
- *   ┌──────────────────────────────────────────────────┐
- *   │  Rescan HTTP (toutes les RESCAN_INTERVAL_S)      │
- *   │  → Trouve candidats 0.88-0.94                    │
- *   │  → Remplit MarketCache                           │
- *   │  → Abonne ClobWebSocket aux nouveaux tokenIds    │
- *   └──────────────────────┬───────────────────────────┘
- *                          │
- *   ┌──────────────────────▼───────────────────────────┐
- *   │  ClobWebSocket (temps réel, <200ms)              │
- *   │  price_update → MarketCache.updatePrice()        │
- *   │  Si prix dans [yesMin, yesMax] + debounce 5s     │
- *   │  → strategy.buildSignalFromCache()               │
- *   │  → executor.processSignals()   ← IMMÉDIAT        │
- *   └──────────────────────────────────────────────────┘
+ *  BinanceWebSocket ──── prix crypto live ────────────────────────┐
+ *                                                                  │
+ *  ClobWebSocket ──── price_update ──→ buildSignalFromCache() ────┤→ OrderExecutor
+ *                                                                  │
+ *  Rescan HTTP (5min) ──→ MarketCache ──→ subscribe WS ───────────┘
+ *      │
+ *      └──→ KalshiConnector ──→ ArbDetector ──→ log opportunités arb
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { getLogger }           from './utils/logger';
 import { PolymarketConnector } from './connectors/PolymarketConnector';
+import { KalshiConnector }     from './connectors/KalshiConnector';
 import { HighProbStrategy }    from './strategies/HighProbStrategy';
 import { OrderExecutor }       from './executor/OrderExecutor';
 import { ClobWebSocket }       from './feeds/ClobWebSocket';
 import { MarketCache }         from './feeds/MarketCache';
+import { BinanceWebSocket }    from './price/BinanceWebSocket';
+import { ArbDetector }         from './arbitrage/ArbDetector';
 import type { PriceUpdate }    from './feeds/ClobWebSocket';
 import type { CachedMarket }   from './feeds/MarketCache';
 
 const log = getLogger('Main');
 
-// ── Config ────────────────────────────────────────────────────
+// ── Config ─────────────────────────────────────────────────────
 const {
   PRIVATE_KEY, ALCHEMY_URL,
   CLOB_API_KEY, CLOB_SECRET, CLOB_PASSPHRASE,
@@ -43,22 +39,23 @@ if (!PRIVATE_KEY || !ALCHEMY_URL || !CLOB_API_KEY || !CLOB_SECRET || !CLOB_PASSP
   process.exit(1);
 }
 
-const RESCAN_INTERVAL_S = parseInt(process.env.RESCAN_INTERVAL_S  ?? '300',  10); // 5 min
-const PURGE_INTERVAL_S  = parseInt(process.env.PURGE_INTERVAL_S   ?? '600',  10); // 10 min
-const DEBOUNCE_MS       = parseInt(process.env.WS_DEBOUNCE_MS     ?? '5000', 10); // 5s anti-spam
-const DRY_RUN           = process.env.DRY_RUN === 'true';
-const LOG_LEVEL         = process.env.LOG_LEVEL ?? 'info';
+const RESCAN_INTERVAL_S  = parseInt(process.env.RESCAN_INTERVAL_S  ?? '300',  10);
+const ARB_INTERVAL_S     = parseInt(process.env.ARB_INTERVAL_S     ?? '120',  10);
+const PURGE_INTERVAL_S   = parseInt(process.env.PURGE_INTERVAL_S   ?? '600',  10);
+const DEBOUNCE_MS        = parseInt(process.env.WS_DEBOUNCE_MS     ?? '5000', 10);
+const DRY_RUN            = process.env.DRY_RUN === 'true';
+const LOG_LEVEL          = process.env.LOG_LEVEL ?? 'info';
 
 async function main() {
-  log.info('╔══════════════════════════════════════════════════════╗');
-  log.info('║  🤖 POLYBOT v2 — Event-Driven Stack 1               ║');
-  log.info(`║  Mode     : ${DRY_RUN ? 'PAPER TRADING (DRY-RUN)     ' : 'LIVE (ordres réels)          '}  ║`);
-  log.info(`║  Rescan   : /${RESCAN_INTERVAL_S}s  |  Debounce WS : ${DEBOUNCE_MS}ms      ║`);
-  log.info('╚══════════════════════════════════════════════════════╝');
+  log.info('╔══════════════════════════════════════════════════════════╗');
+  log.info('║  🤖 POLYBOT v2 — Stack 2 : Multi-Feed + Arb            ║');
+  log.info(`║  Mode     : ${DRY_RUN ? 'PAPER TRADING (DRY-RUN)         ' : 'LIVE (ordres réels)              '}║`);
+  log.info(`║  Rescan   : /${RESCAN_INTERVAL_S}s  |  Arb scan : /${ARB_INTERVAL_S}s  |  WS debounce: ${DEBOUNCE_MS}ms  ║`);
+  log.info('╚══════════════════════════════════════════════════════════╝');
 
   const creds = { key: CLOB_API_KEY!, secret: CLOB_SECRET!, passphrase: CLOB_PASSPHRASE! };
 
-  // ── Instanciation ─────────────────────────────────────────────
+  // ── Instanciation ───────────────────────────────────────────────
   const connector = new PolymarketConnector(PRIVATE_KEY!, ALCHEMY_URL!, creds);
 
   const strategy = new HighProbStrategy(connector, {
@@ -75,10 +72,13 @@ async function main() {
     dryRun:        DRY_RUN,
   });
 
-  const cache  = new MarketCache();
-  const clobWs = new ClobWebSocket(creds);
+  const cache      = new MarketCache();
+  const clobWs     = new ClobWebSocket(creds);
+  const binanceWs  = new BinanceWebSocket();
+  const kalshi     = new KalshiConnector();
+  const arbDetect  = new ArbDetector();
 
-  // ── Connexion ─────────────────────────────────────────────────
+  // ── Connexion Polygon ────────────────────────────────────────────
   try {
     await connector.connect();
   } catch (e: any) {
@@ -91,29 +91,32 @@ async function main() {
     log.info('Solde USDC.e au démarrage', { balance: balance.toFixed(4) });
   } catch { /* non bloquant */ }
 
-  // ── Rescan HTTP : découverte de nouveaux marchés ───────────────
-  let rescanCount = 0;
+  // ── Compteurs ────────────────────────────────────────────────────
+  let rescanCount   = 0;
   let wsSignalCount = 0;
+  let arbCount      = 0;
 
+  // ── Rescan HTTP Polymarket : découverte marchés candidats ────────
   const rescan = async () => {
     rescanCount++;
     const stats = executor.stats;
 
     if (DRY_RUN) {
       const wr = stats.paperResolved > 0
-        ? ((stats.paperWins / stats.paperResolved) * 100).toFixed(1) + '%'
-        : 'N/A';
+        ? ((stats.paperWins / stats.paperResolved) * 100).toFixed(1) + '%' : 'N/A';
       log.info(`🔄 Rescan #${rescanCount} [PAPER]`, {
-        cached: cache.size,
-        wsSignals: wsSignalCount,
+        cached:      cache.size,
+        wsSignals:   wsSignalCount,
+        arbOpp:      arbCount,
         paperTrades: stats.paperTrades,
-        paperPnl: (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
-        winRate: wr,
+        paperPnl:    (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
+        winRate:     wr,
       });
     } else {
       log.info(`🔄 Rescan #${rescanCount}`, {
         cached:    cache.size,
         wsSignals: wsSignalCount,
+        arbOpp:    arbCount,
         trades:    stats.tradeCount,
         loss:      stats.totalLoss.toFixed(2),
       });
@@ -137,22 +140,20 @@ async function main() {
       return;
     }
 
-    // Ajoute les nouveaux marchés en cache et abonne le WS
     const newTokenIds: string[] = [];
-
     for (const sig of signals) {
       if (!cache.has(sig.conditionId)) {
         const cached: CachedMarket = {
-          conditionId:  sig.conditionId,
-          tokenId:      sig.tokenId,
-          question:     sig.question,
-          domain:       sig.domain,
-          endDate:      new Date(Date.now() + sig.minsLeft * 60_000).toISOString(),
-          liquidity:    sig.liquidity,
-          validated:    true,
-          lastPrice:    sig.yesPrice,
-          lastUpdated:  Date.now(),
-          reasoning:    sig.reasoning,
+          conditionId: sig.conditionId,
+          tokenId:     sig.tokenId,
+          question:    sig.question,
+          domain:      sig.domain,
+          endDate:     sig.endDate,
+          liquidity:   sig.liquidity,
+          validated:   true,
+          lastPrice:   sig.yesPrice,
+          lastUpdated: Date.now(),
+          reasoning:   sig.reasoning,
         };
         cache.set(cached);
         newTokenIds.push(sig.tokenId);
@@ -161,33 +162,81 @@ async function main() {
 
     if (newTokenIds.length > 0) {
       clobWs.subscribe(newTokenIds);
-      log.info(`Rescan — ${newTokenIds.length} nouveau(x) marché(s) ajouté(s) au WS`, {
-        total: cache.size,
+      log.info(`Rescan — ${newTokenIds.length} nouveau(x) marché(s) → WS abonné`, {
+        total:         cache.size,
         subscriptions: clobWs.subscriptionCount,
       });
     }
   };
 
-  // ── Handler WebSocket : hot path <200ms ───────────────────────
+  // ── Scan d'arbitrage Kalshi ──────────────────────────────────────
+  const arbScan = async () => {
+    if (!kalshi.isAvailable) return;
+    if (cache.size === 0) return;
+
+    try {
+      const kalshiMarkets = await kalshi.getOpenMarkets();
+      if (kalshiMarkets.length === 0) return;
+
+      const opportunities = arbDetect.detect(cache.all(), kalshiMarkets);
+      if (opportunities.length === 0) return;
+
+      arbCount += opportunities.length;
+
+      for (const opp of opportunities.slice(0, 5)) {
+        log.info('🔀 Opportunité d\'arbitrage', {
+          type:       opp.type,
+          spread:     (opp.spread * 100).toFixed(2) + '%',
+          cheapSide:  opp.cheapSide,
+          pnl:        '+' + (opp.expectedPnl * 100).toFixed(2) + '¢/share',
+          polyPrice:  opp.polyYesPrice,
+          kalshiAsk:  opp.kalshiYesAsk,
+          poly:       opp.polyQuestion.substring(0, 50),
+          kalshi:     opp.kalshiTitle.substring(0, 50),
+          confidence: (opp.matchScore * 100).toFixed(0) + '%',
+        });
+      }
+    } catch (e: any) {
+      log.error('Erreur scan arbitrage', { error: e.message });
+    }
+  };
+
+  // ── Handler WebSocket CLOB : hot path <200ms ────────────────────
   clobWs.on('price_update', async (update: PriceUpdate) => {
     const { tokenId, price } = update;
 
-    // Met à jour le cache (toujours, même hors range)
     const market = cache.updatePrice(tokenId, price);
     if (!market) return;
 
-    // Range filter
     const cfg = strategy.config;
     if (price < cfg.yesMin || price > cfg.yesMax) return;
-
-    // Anti-spam : une évaluation max par marché par DEBOUNCE_MS
     if (!cache.canEvaluate(tokenId, DEBOUNCE_MS)) return;
+
+    // Pour les marchés Crypto : valide le buffer avec prix Binance live
+    if (market.domain === 'Crypto') {
+      const { detectTicker, parseThreshold } = await import('./price/PriceFeed');
+      const ticker    = detectTicker(market.question);
+      const threshold = parseThreshold(market.question);
+      if (ticker && threshold) {
+        const livePrice = binanceWs.getPrice(ticker);
+        if (livePrice !== null) {
+          const buffer = livePrice - threshold;
+          const minBuf = strategy.config.cryptoBufferUsd;
+          if (buffer < minBuf) {
+            log.debug(`WS crypto — buffer insuffisant`, {
+              ticker, livePrice, threshold, buffer: buffer.toFixed(0),
+            });
+            return;
+          }
+        }
+      }
+    }
 
     const signal = strategy.buildSignalFromCache(market, price);
     if (!signal) return;
 
     wsSignalCount++;
-    log.info('⚡ Signal WS détecté', {
+    log.info('⚡ Signal WS', {
       domain:    signal.domain,
       question:  signal.question.substring(0, 60),
       livePrice: price,
@@ -201,53 +250,59 @@ async function main() {
     }
   });
 
+  // ── BinanceWS : log quand les prix crypto arrivent ───────────────
+  binanceWs.on('connected', () =>
+    log.info('BinanceWS — connecté ✓', {
+      tracking: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].join(', '),
+    }),
+  );
+
   clobWs.on('connected', () =>
-    log.info('WebSocket CLOB — connecté', { subscriptions: clobWs.subscriptionCount }),
-  );
-  clobWs.on('disconnected', (code: number) =>
-    log.warn('WebSocket CLOB — déconnecté', { code }),
+    log.info('ClobWS — connecté ✓', { subscriptions: clobWs.subscriptionCount }),
   );
 
-  // ── Démarrage ─────────────────────────────────────────────────
-  // 1. Premier scan HTTP immédiat
-  await rescan();
+  // ── Démarrage ────────────────────────────────────────────────────
+  await rescan();          // Scan initial pour alimenter le cache
 
-  // 2. Connexion WebSocket (après avoir les premiers tokenIds)
-  clobWs.connect();
+  clobWs.connect();        // WS Polymarket
+  binanceWs.connect();     // WS Binance (prix crypto)
 
-  // 3. Rescan périodique
-  const rescanInterval = setInterval(rescan, RESCAN_INTERVAL_S * 1_000);
+  const rescanInterval = setInterval(rescan,  RESCAN_INTERVAL_S * 1_000);
+  const arbInterval    = setInterval(arbScan, ARB_INTERVAL_S    * 1_000);
+  const purgeInterval  = setInterval(() => cache.purgeExpired(), PURGE_INTERVAL_S * 1_000);
 
-  // 4. Purge des marchés expirés
-  const purgeInterval = setInterval(() => cache.purgeExpired(), PURGE_INTERVAL_S * 1_000);
+  // Premier scan arb 30s après démarrage (laisser le temps au cache)
+  setTimeout(arbScan, 30_000);
 
-  // ── Arrêt propre ──────────────────────────────────────────────
+  // ── Arrêt propre ─────────────────────────────────────────────────
   const shutdown = (sig: string) => {
-    log.info(`Signal ${sig} reçu — arrêt propre...`);
+    log.info(`Signal ${sig} — arrêt propre...`);
     clearInterval(rescanInterval);
+    clearInterval(arbInterval);
     clearInterval(purgeInterval);
     clobWs.destroy();
+    binanceWs.destroy();
 
     const stats = executor.stats;
-
     if (DRY_RUN) {
       const wr = stats.paperResolved > 0
-        ? ((stats.paperWins / stats.paperResolved) * 100).toFixed(1) + '%'
-        : 'N/A';
+        ? ((stats.paperWins / stats.paperResolved) * 100).toFixed(1) + '%' : 'N/A';
       log.info('📊 Statistiques finales [PAPER TRADING]', {
-        rescans:       rescanCount,
-        wsSignals:     wsSignalCount,
-        trades:        stats.paperTrades,
-        resolved:      stats.paperResolved,
-        wins:          stats.paperWins,
-        losses:        stats.paperLosses,
-        winRate:       wr,
-        paperPnl:      (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
+        rescans:    rescanCount,
+        wsSignals:  wsSignalCount,
+        arbOpp:     arbCount,
+        trades:     stats.paperTrades,
+        resolved:   stats.paperResolved,
+        wins:       stats.paperWins,
+        losses:     stats.paperLosses,
+        winRate:    wr,
+        paperPnl:   (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
       });
     } else {
       log.info('📊 Statistiques finales', {
         rescans:   rescanCount,
         wsSignals: wsSignalCount,
+        arbOpp:    arbCount,
         trades:    stats.tradeCount,
         totalLoss: stats.totalLoss.toFixed(2) + ' USDC.e',
       });

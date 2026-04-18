@@ -52,6 +52,7 @@ export interface MarketSignal {
   domain:      string;
   yesPrice:    number;     // bestAsk
   tokenId:     string;
+  endDate:     string;     // ISO date exacte de l'expiry (depuis Gamma API)
   minsLeft:    number;
   liquidity:   number;
   stakeUsdc:   number;     // mise calculée avec safetyMargin
@@ -135,6 +136,7 @@ export class HighProbStrategy {
         domain,
         yesPrice,
         tokenId:     tokenIds[0],
+        endDate:     m.endDate,
         minsLeft:    Math.round(left / 60_000),
         liquidity,
         stakeUsdc:   effectiveStake,
@@ -236,6 +238,7 @@ export class HighProbStrategy {
       domain:      market.domain,
       yesPrice:    livePrice,
       tokenId:     market.tokenId,
+      endDate:     market.endDate,
       minsLeft,
       liquidity:   market.liquidity,
       stakeUsdc:   effectiveStake,
