@@ -1,34 +1,38 @@
 /**
- * main.ts — Orchestrateur Stack 2
+ * main.ts — Orchestrateur Stack 2 (sans Kalshi)
  *
  * Flux de données :
  *
- *  BinanceWebSocket ──── prix crypto live ────────────────────────┐
+ *  BinanceWebSocket ── prix crypto live ──────────────────────────┐
  *                                                                  │
- *  ClobWebSocket ──── price_update ──→ buildSignalFromCache() ────┤→ OrderExecutor
+ *  ClobWebSocket ── price_update ──→ CrossSignal? ──→ Executor ───┘
  *                                                                  │
  *  Rescan HTTP (5min) ──→ MarketCache ──→ subscribe WS ───────────┘
- *      │
- *      └──→ KalshiConnector ──→ ArbDetector ──→ log opportunités arb
+ *        │
+ *        └──→ ManifoldConnector ──→ CrossSignalDetector (validation)
+ *
+ *  NewsFeed (RSS, 60s) ──→ match marché ──→ rééval immédiate
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { getLogger }           from './utils/logger';
-import { PolymarketConnector } from './connectors/PolymarketConnector';
-import { KalshiConnector }     from './connectors/KalshiConnector';
-import { HighProbStrategy }    from './strategies/HighProbStrategy';
-import { OrderExecutor }       from './executor/OrderExecutor';
-import { ClobWebSocket }       from './feeds/ClobWebSocket';
-import { MarketCache }         from './feeds/MarketCache';
-import { BinanceWebSocket }    from './price/BinanceWebSocket';
-import { ArbDetector }         from './arbitrage/ArbDetector';
-import type { PriceUpdate }    from './feeds/ClobWebSocket';
-import type { CachedMarket }   from './feeds/MarketCache';
+import { getLogger }              from './utils/logger';
+import { PolymarketConnector }    from './connectors/PolymarketConnector';
+import { ManifoldConnector }      from './connectors/ManifoldConnector';
+import { HighProbStrategy }       from './strategies/HighProbStrategy';
+import { OrderExecutor }          from './executor/OrderExecutor';
+import { ClobWebSocket }          from './feeds/ClobWebSocket';
+import { MarketCache }            from './feeds/MarketCache';
+import { NewsFeed }               from './feeds/NewsFeed';
+import { BinanceWebSocket }       from './price/BinanceWebSocket';
+import { CrossSignalDetector }    from './arbitrage/CrossSignalDetector';
+import type { PriceUpdate }       from './feeds/ClobWebSocket';
+import type { CachedMarket }      from './feeds/MarketCache';
+import type { NewsMatch }         from './feeds/NewsFeed';
 
 const log = getLogger('Main');
 
-// ── Config ─────────────────────────────────────────────────────
+// ── Config ──────────────────────────────────────────────────────
 const {
   PRIVATE_KEY, ALCHEMY_URL,
   CLOB_API_KEY, CLOB_SECRET, CLOB_PASSPHRASE,
@@ -39,64 +43,63 @@ if (!PRIVATE_KEY || !ALCHEMY_URL || !CLOB_API_KEY || !CLOB_SECRET || !CLOB_PASSP
   process.exit(1);
 }
 
-const RESCAN_INTERVAL_S  = parseInt(process.env.RESCAN_INTERVAL_S  ?? '300',  10);
-const ARB_INTERVAL_S     = parseInt(process.env.ARB_INTERVAL_S     ?? '120',  10);
-const PURGE_INTERVAL_S   = parseInt(process.env.PURGE_INTERVAL_S   ?? '600',  10);
-const DEBOUNCE_MS        = parseInt(process.env.WS_DEBOUNCE_MS     ?? '5000', 10);
-const DRY_RUN            = process.env.DRY_RUN === 'true';
-const LOG_LEVEL          = process.env.LOG_LEVEL ?? 'info';
+const RESCAN_INTERVAL_S   = parseInt(process.env.RESCAN_INTERVAL_S   ?? '300',  10);  // 5 min
+const MANIFOLD_INTERVAL_S = parseInt(process.env.MANIFOLD_INTERVAL_S ?? '180',  10);  // 3 min
+const PURGE_INTERVAL_S    = parseInt(process.env.PURGE_INTERVAL_S    ?? '600',  10);  // 10 min
+const DEBOUNCE_MS         = parseInt(process.env.WS_DEBOUNCE_MS      ?? '5000', 10);  // 5s
+const DRY_RUN             = process.env.DRY_RUN === 'true';
 
 async function main() {
   log.info('╔══════════════════════════════════════════════════════════╗');
-  log.info('║  🤖 POLYBOT v2 — Stack 2 : Multi-Feed + Arb            ║');
-  log.info(`║  Mode     : ${DRY_RUN ? 'PAPER TRADING (DRY-RUN)         ' : 'LIVE (ordres réels)              '}║`);
-  log.info(`║  Rescan   : /${RESCAN_INTERVAL_S}s  |  Arb scan : /${ARB_INTERVAL_S}s  |  WS debounce: ${DEBOUNCE_MS}ms  ║`);
+  log.info('║  🤖 POLYBOT v2 — Multi-Feed : WS + Manifold + News     ║');
+  log.info(`║  Mode      : ${DRY_RUN ? 'PAPER TRADING (DRY-RUN)        ' : 'LIVE (ordres réels)             '}║`);
+  log.info(`║  Rescan    : /${RESCAN_INTERVAL_S}s  Manifold: /${MANIFOLD_INTERVAL_S}s  News: /${process.env.NEWS_POLL_S ?? '60'}s    ║`);
   log.info('╚══════════════════════════════════════════════════════════╝');
 
   const creds = { key: CLOB_API_KEY!, secret: CLOB_SECRET!, passphrase: CLOB_PASSPHRASE! };
 
-  // ── Instanciation ───────────────────────────────────────────────
-  const connector = new PolymarketConnector(PRIVATE_KEY!, ALCHEMY_URL!, creds);
-
-  const strategy = new HighProbStrategy(connector, {
+  // ── Instanciation ────────────────────────────────────────────────
+  const connector   = new PolymarketConnector(PRIVATE_KEY!, ALCHEMY_URL!, creds);
+  const strategy    = new HighProbStrategy(connector, {
     yesMin:          parseFloat(process.env.YES_MIN      ?? '0.88'),
     yesMax:          parseFloat(process.env.YES_MAX      ?? '0.94'),
     stakeUsdc:       parseFloat(process.env.STAKE_USDC   ?? '0.80'),
     expiryMaxHours:  parseInt(process.env.EXPIRY_MAX_H   ?? '48',  10),
     cryptoBufferUsd: parseInt(process.env.CRYPTO_BUFFER  ?? '60',  10),
   });
-
-  const executor = new OrderExecutor(connector, strategy, {
-    maxOpenTrades: parseInt(process.env.MAX_TRADES ?? '3', 10),
-    maxTotalLoss:  parseFloat(process.env.MAX_LOSS  ?? '2.00'),
-    dryRun:        DRY_RUN,
+  const executor    = new OrderExecutor(connector, strategy, {
+    maxOpenTrades:   parseInt(process.env.MAX_TRADES ?? '3', 10),
+    maxTotalLoss:    parseFloat(process.env.MAX_LOSS  ?? '2.00'),
+    dryRun:          DRY_RUN,
   });
 
-  const cache      = new MarketCache();
-  const clobWs     = new ClobWebSocket(creds);
-  const binanceWs  = new BinanceWebSocket();
-  const kalshi     = new KalshiConnector();
-  const arbDetect  = new ArbDetector();
+  const cache       = new MarketCache();
+  const clobWs      = new ClobWebSocket(creds);
+  const binanceWs   = new BinanceWebSocket();
+  const manifold    = new ManifoldConnector();
+  const crossSignal = new CrossSignalDetector();
+  const newsFeed    = new NewsFeed();
 
   // ── Connexion Polygon ────────────────────────────────────────────
   try {
     await connector.connect();
   } catch (e: any) {
-    log.error('Connexion Polygon échouée — arrêt', { error: e.message });
+    log.error('Connexion Polygon échouée', { error: e.message });
     process.exit(1);
   }
 
   try {
     const balance = await connector.getUsdcBalance();
-    log.info('Solde USDC.e au démarrage', { balance: balance.toFixed(4) });
+    log.info('Solde USDC.e', { balance: balance.toFixed(4) });
   } catch { /* non bloquant */ }
 
   // ── Compteurs ────────────────────────────────────────────────────
   let rescanCount   = 0;
   let wsSignalCount = 0;
-  let arbCount      = 0;
+  let newsHitCount  = 0;
+  let confirmedCount = 0;
 
-  // ── Rescan HTTP Polymarket : découverte marchés candidats ────────
+  // ── Rescan HTTP Polymarket ───────────────────────────────────────
   const rescan = async () => {
     rescanCount++;
     const stats = executor.stats;
@@ -105,106 +108,106 @@ async function main() {
       const wr = stats.paperResolved > 0
         ? ((stats.paperWins / stats.paperResolved) * 100).toFixed(1) + '%' : 'N/A';
       log.info(`🔄 Rescan #${rescanCount} [PAPER]`, {
-        cached:      cache.size,
-        wsSignals:   wsSignalCount,
-        arbOpp:      arbCount,
+        cached: cache.size, wsSignals: wsSignalCount,
+        newsHits: newsHitCount, confirmed: confirmedCount,
         paperTrades: stats.paperTrades,
-        paperPnl:    (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
-        winRate:     wr,
+        pnl: (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
+        winRate: wr,
       });
     } else {
       log.info(`🔄 Rescan #${rescanCount}`, {
-        cached:    cache.size,
-        wsSignals: wsSignalCount,
-        arbOpp:    arbCount,
-        trades:    stats.tradeCount,
-        loss:      stats.totalLoss.toFixed(2),
+        cached: cache.size, wsSignals: wsSignalCount,
+        newsHits: newsHitCount, trades: stats.tradeCount,
+        loss: stats.totalLoss.toFixed(2),
       });
     }
 
-    if (executor.stopped) {
-      log.warn('Bot arrêté (stop-loss). Relance manuelle requise.');
-      process.exit(0);
-    }
+    if (executor.stopped) { log.warn('Bot arrêté (stop-loss).'); process.exit(0); }
 
     let signals;
-    try {
-      signals = await strategy.scan();
-    } catch (e: any) {
-      log.error('Erreur rescan HTTP', { error: e.message });
-      return;
-    }
+    try { signals = await strategy.scan(); }
+    catch (e: any) { log.error('Erreur rescan', { error: e.message }); return; }
 
-    if (signals.length === 0) {
-      log.info('Rescan — aucun candidat trouvé');
-      return;
-    }
+    if (signals.length === 0) { log.info('Rescan — aucun candidat'); return; }
 
     const newTokenIds: string[] = [];
     for (const sig of signals) {
       if (!cache.has(sig.conditionId)) {
-        const cached: CachedMarket = {
-          conditionId: sig.conditionId,
-          tokenId:     sig.tokenId,
-          question:    sig.question,
-          domain:      sig.domain,
-          endDate:     sig.endDate,
-          liquidity:   sig.liquidity,
-          validated:   true,
-          lastPrice:   sig.yesPrice,
-          lastUpdated: Date.now(),
-          reasoning:   sig.reasoning,
-        };
-        cache.set(cached);
+        cache.set({
+          conditionId: sig.conditionId, tokenId: sig.tokenId,
+          question: sig.question,       domain: sig.domain,
+          endDate: sig.endDate,         liquidity: sig.liquidity,
+          validated: true,              lastPrice: sig.yesPrice,
+          lastUpdated: Date.now(),      reasoning: sig.reasoning,
+        } satisfies CachedMarket);
         newTokenIds.push(sig.tokenId);
       }
     }
 
     if (newTokenIds.length > 0) {
       clobWs.subscribe(newTokenIds);
-      log.info(`Rescan — ${newTokenIds.length} nouveau(x) marché(s) → WS abonné`, {
-        total:         cache.size,
-        subscriptions: clobWs.subscriptionCount,
+      log.info(`Rescan — ${newTokenIds.length} nouveau(x) marché(s)`, {
+        total: cache.size, subscriptions: clobWs.subscriptionCount,
       });
     }
   };
 
-  // ── Scan d'arbitrage Kalshi ──────────────────────────────────────
-  const arbScan = async () => {
-    if (!kalshi.isAvailable) return;
+  // ── Validation croisée Manifold (toutes les 3 min) ───────────────
+  const manifoldScan = async () => {
     if (cache.size === 0) return;
-
     try {
-      const kalshiMarkets = await kalshi.getOpenMarkets();
-      if (kalshiMarkets.length === 0) return;
+      const manifoldMarkets = await manifold.getOpenBinaryMarkets();
+      if (manifoldMarkets.length === 0) return;
 
-      const opportunities = arbDetect.detect(cache.all(), kalshiMarkets);
-      if (opportunities.length === 0) return;
+      const results = crossSignal.analyze(cache.all(), manifoldMarkets);
+      const confirmed  = results.filter(r => r.confidence === 'CONFIRMED').length;
+      const divergent  = results.filter(r => r.confidence === 'DIVERGENT').length;
+      confirmedCount  += confirmed;
 
-      arbCount += opportunities.length;
-
-      for (const opp of opportunities.slice(0, 5)) {
-        log.info('🔀 Opportunité d\'arbitrage', {
-          type:       opp.type,
-          spread:     (opp.spread * 100).toFixed(2) + '%',
-          cheapSide:  opp.cheapSide,
-          pnl:        '+' + (opp.expectedPnl * 100).toFixed(2) + '¢/share',
-          polyPrice:  opp.polyYesPrice,
-          kalshiAsk:  opp.kalshiYesAsk,
-          poly:       opp.polyQuestion.substring(0, 50),
-          kalshi:     opp.kalshiTitle.substring(0, 50),
-          confidence: (opp.matchScore * 100).toFixed(0) + '%',
+      if (confirmed > 0 || divergent > 0) {
+        log.info('🧭 Manifold cross-validation', {
+          analyzed: results.length, confirmed, divergent,
+          neutral: results.length - confirmed - divergent,
         });
       }
     } catch (e: any) {
-      log.error('Erreur scan arbitrage', { error: e.message });
+      log.error('Erreur Manifold scan', { error: e.message });
     }
   };
 
-  // ── Handler WebSocket CLOB : hot path <200ms ────────────────────
+  // ── Helper : exécuter un signal (utilisé par WS + News) ──────────
+  const executeIfValid = async (
+    market:  CachedMarket,
+    price:   number,
+    source:  string,
+  ) => {
+    const signal = strategy.buildSignalFromCache(market, price);
+    if (!signal) return;
+
+    // Enrichit le log avec la confiance Manifold si connue
+    const confidence = crossSignal.getConfidence(market.conditionId);
+
+    if (confidence === 'DIVERGENT') {
+      log.warn(`Signal ${source} ignoré — Manifold divergent`, {
+        question: signal.question.substring(0, 60),
+        polyPrice: price,
+      });
+      return;
+    }
+
+    const tag = confidence === 'CONFIRMED' ? '⚡✅' : '⚡';
+    log.info(`${tag} Signal ${source}${confidence === 'CONFIRMED' ? ' [CONFIRMÉ Manifold]' : ''}`, {
+      domain: signal.domain, question: signal.question.substring(0, 60),
+      livePrice: price, minsLeft: signal.minsLeft,
+    });
+
+    try { await executor.processSignals([signal]); }
+    catch (e: any) { log.error('Erreur processSignals', { error: e.message }); }
+  };
+
+  // ── Handler WebSocket CLOB ───────────────────────────────────────
   clobWs.on('price_update', async (update: PriceUpdate) => {
     const { tokenId, price } = update;
-
     const market = cache.updatePrice(tokenId, price);
     if (!market) return;
 
@@ -212,99 +215,79 @@ async function main() {
     if (price < cfg.yesMin || price > cfg.yesMax) return;
     if (!cache.canEvaluate(tokenId, DEBOUNCE_MS)) return;
 
-    // Pour les marchés Crypto : valide le buffer avec prix Binance live
+    // Buffer crypto via Binance WS (0 HTTP)
     if (market.domain === 'Crypto') {
       const { detectTicker, parseThreshold } = await import('./price/PriceFeed');
       const ticker    = detectTicker(market.question);
       const threshold = parseThreshold(market.question);
       if (ticker && threshold) {
         const livePrice = binanceWs.getPrice(ticker);
-        if (livePrice !== null) {
-          const buffer = livePrice - threshold;
-          const minBuf = strategy.config.cryptoBufferUsd;
-          if (buffer < minBuf) {
-            log.debug(`WS crypto — buffer insuffisant`, {
-              ticker, livePrice, threshold, buffer: buffer.toFixed(0),
-            });
-            return;
-          }
-        }
+        if (livePrice !== null && (livePrice - threshold) < cfg.cryptoBufferUsd) return;
       }
     }
 
-    const signal = strategy.buildSignalFromCache(market, price);
-    if (!signal) return;
-
     wsSignalCount++;
-    log.info('⚡ Signal WS', {
-      domain:    signal.domain,
-      question:  signal.question.substring(0, 60),
-      livePrice: price,
-      minsLeft:  signal.minsLeft,
-    });
-
-    try {
-      await executor.processSignals([signal]);
-    } catch (e: any) {
-      log.error('Erreur traitement signal WS', { error: e.message });
-    }
+    await executeIfValid(market, price, 'WS');
   });
 
-  // ── BinanceWS : log quand les prix crypto arrivent ───────────────
-  binanceWs.on('connected', () =>
-    log.info('BinanceWS — connecté ✓', {
-      tracking: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].join(', '),
-    }),
-  );
+  // ── Handler NewsFeed ─────────────────────────────────────────────
+  newsFeed.on('match', async (nm: NewsMatch) => {
+    newsHitCount++;
+    const market = cache.getByConditionId(nm.market.conditionId);
+    if (!market) return;
 
-  clobWs.on('connected', () =>
-    log.info('ClobWS — connecté ✓', { subscriptions: clobWs.subscriptionCount }),
-  );
+    // Contourne le debounce WS — une news est un événement fort
+    log.info('📰 News trigger — réévaluation forcée', {
+      headline: nm.item.title.substring(0, 70),
+      market:   market.question.substring(0, 60),
+      score:    (nm.score * 100).toFixed(0) + '%',
+    });
+    await executeIfValid(market, market.lastPrice, 'NEWS');
+  });
+
+  // ── Events connexion ─────────────────────────────────────────────
+  clobWs.on('connected',    () => log.info('ClobWS ✓',    { subs: clobWs.subscriptionCount }));
+  clobWs.on('disconnected', (c: number) => log.warn('ClobWS ✗', { code: c }));
+  binanceWs.on('connected', () => log.info('BinanceWS ✓', { pairs: 'BTC/ETH/SOL/XRP/DOGE' }));
 
   // ── Démarrage ────────────────────────────────────────────────────
-  await rescan();          // Scan initial pour alimenter le cache
+  await rescan();
+  clobWs.connect();
+  binanceWs.connect();
+  newsFeed.start(() => cache.all());
 
-  clobWs.connect();        // WS Polymarket
-  binanceWs.connect();     // WS Binance (prix crypto)
+  const rescanInterval   = setInterval(rescan,       RESCAN_INTERVAL_S   * 1_000);
+  const manifoldInterval = setInterval(manifoldScan, MANIFOLD_INTERVAL_S * 1_000);
+  const purgeInterval    = setInterval(() => cache.purgeExpired(), PURGE_INTERVAL_S * 1_000);
 
-  const rescanInterval = setInterval(rescan,  RESCAN_INTERVAL_S * 1_000);
-  const arbInterval    = setInterval(arbScan, ARB_INTERVAL_S    * 1_000);
-  const purgeInterval  = setInterval(() => cache.purgeExpired(), PURGE_INTERVAL_S * 1_000);
-
-  // Premier scan arb 30s après démarrage (laisser le temps au cache)
-  setTimeout(arbScan, 30_000);
+  setTimeout(manifoldScan, 45_000);   // 1er scan Manifold 45s après démarrage
 
   // ── Arrêt propre ─────────────────────────────────────────────────
   const shutdown = (sig: string) => {
-    log.info(`Signal ${sig} — arrêt propre...`);
+    log.info(`${sig} — arrêt propre...`);
     clearInterval(rescanInterval);
-    clearInterval(arbInterval);
+    clearInterval(manifoldInterval);
     clearInterval(purgeInterval);
     clobWs.destroy();
     binanceWs.destroy();
+    newsFeed.stop();
 
     const stats = executor.stats;
     if (DRY_RUN) {
       const wr = stats.paperResolved > 0
         ? ((stats.paperWins / stats.paperResolved) * 100).toFixed(1) + '%' : 'N/A';
-      log.info('📊 Statistiques finales [PAPER TRADING]', {
-        rescans:    rescanCount,
-        wsSignals:  wsSignalCount,
-        arbOpp:     arbCount,
-        trades:     stats.paperTrades,
-        resolved:   stats.paperResolved,
-        wins:       stats.paperWins,
-        losses:     stats.paperLosses,
-        winRate:    wr,
-        paperPnl:   (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
+      log.info('📊 Bilan final [PAPER TRADING]', {
+        rescans: rescanCount, wsSignals: wsSignalCount,
+        newsHits: newsHitCount, manifoldConfirmed: confirmedCount,
+        trades: stats.paperTrades, resolved: stats.paperResolved,
+        wins: stats.paperWins, losses: stats.paperLosses,
+        winRate: wr,
+        pnl: (stats.paperPnl >= 0 ? '+' : '') + stats.paperPnl.toFixed(4) + ' USDC.e',
       });
     } else {
-      log.info('📊 Statistiques finales', {
-        rescans:   rescanCount,
-        wsSignals: wsSignalCount,
-        arbOpp:    arbCount,
-        trades:    stats.tradeCount,
-        totalLoss: stats.totalLoss.toFixed(2) + ' USDC.e',
+      log.info('📊 Bilan final', {
+        rescans: rescanCount, wsSignals: wsSignalCount, newsHits: newsHitCount,
+        trades: stats.tradeCount, totalLoss: stats.totalLoss.toFixed(2) + ' USDC.e',
       });
     }
     process.exit(0);
@@ -314,7 +297,4 @@ async function main() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-main().catch(e => {
-  console.error('❌ Erreur fatale :', e.message);
-  process.exit(1);
-});
+main().catch(e => { console.error('❌ Erreur fatale :', e.message); process.exit(1); });
