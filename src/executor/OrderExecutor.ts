@@ -47,13 +47,35 @@ type TradeOutcome =
   | { ok: true;  orderId: string; fillPrice: number }
   | { ok: false; reason: string };
 
+// ── Position paper trading ────────────────────────────────────────
+interface PaperTrade {
+  tradeId:    string;
+  conditionId:string;
+  question:   string;
+  domain:     string;
+  entryPrice: number;
+  shares:     number;
+  stake:      number;
+  entryTime:  number;
+  expiryMs:   number;   // timestamp absolu d'expiry
+  resolved:   boolean;
+  won:        boolean | null;
+  pnl:        number | null;
+}
+
 export class OrderExecutor {
   private readonly cfg: ExecutorConfig;
-  private openTrades  = 0;
-  private totalLoss   = 0;
-  private tradeCount  = 0;
-  private cancelCount = 0;
-  public  stopped     = false;
+  private openTrades   = 0;
+  private totalLoss    = 0;
+  private tradeCount   = 0;
+  private cancelCount  = 0;
+  public  stopped      = false;
+
+  // Paper trading P&L
+  private paperTrades:  PaperTrade[] = [];
+  private paperPnl      = 0;
+  private paperWins     = 0;
+  private paperLosses   = 0;
 
   constructor(
     private readonly connector: PolymarketConnector,
@@ -161,12 +183,40 @@ export class OrderExecutor {
       });
     }
 
-    // ── Dry-run ──────────────────────────────────────────────
+    // ── Paper Trading ────────────────────────────────────────
     if (this.cfg.dryRun) {
-      log.info(`Trade ${tradeId} [DRY-RUN] — Limit order simulé`, {
-        question: label, price: yesPrice, shares, timeout: `${this.cfg.limitOrderTimeoutMs / 1000}s`,
-      });
+      const paperTrade: PaperTrade = {
+        tradeId,
+        conditionId: signal.conditionId,
+        question:    signal.question,
+        domain,
+        entryPrice:  yesPrice,
+        shares,
+        stake:       stakeUsdc,
+        entryTime:   Date.now(),
+        expiryMs:    Date.now() + minsLeft * 60_000,
+        resolved:    false,
+        won:         null,
+        pnl:         null,
+      };
+
+      this.paperTrades.push(paperTrade);
+      this.openTrades++;
       this.strategy.markFired(signal.conditionId);
+
+      const potentialWin = ((1 - yesPrice) * shares).toFixed(4);
+      log.info(`Trade ${tradeId} [PAPER] — 📋 Position ouverte`, {
+        domain,
+        question:     label,
+        entryPrice:   yesPrice,
+        shares:       shares.toFixed(4),
+        stake:        stakeUsdc.toFixed(4) + ' USDC.e',
+        expiresIn:    `${minsLeft} min`,
+        potentialWin: '+' + potentialWin + ' USDC.e',
+        paperPnl:     (this.paperPnl >= 0 ? '+' : '') + this.paperPnl.toFixed(4) + ' USDC.e',
+      });
+
+      this.schedulePaperResolution(paperTrade, minsLeft);
       return;
     }
 
@@ -218,13 +268,69 @@ export class OrderExecutor {
 
     } else {
       // ❌ Ordre non rempli → annulation déjà faite dans watchOrder
-      log.warn(`Trade ${tradeId} — ❌ NON REMPLI — ${outcome.reason}`, {
+      const reason = (outcome as { ok: false; reason: string }).reason;
+      log.warn(`Trade ${tradeId} — ❌ NON REMPLI — ${reason}`, {
         orderId, question: label,
       });
       this.cancelCount++;
       // On ne comptabilise PAS dans totalLoss : l'ordre a été annulé,
       // aucun USDC n'a été dépensé
     }
+  }
+
+  // ── Résolution asynchrone d'un paper trade ───────────────────
+  private schedulePaperResolution(trade: PaperTrade, minsLeft: number): void {
+    const CHECK_INTERVAL_MS = 5 * 60_000;    // retry toutes les 5 min
+    const MAX_WAIT_EXTRA_MS = 2 * 3_600_000; // abandon 2h après expiry
+
+    const attempt = async (extraWaitedMs: number) => {
+      const result = await this.connector.getMarketResolution(trade.conditionId);
+
+      if (result === 'pending' || result === 'error') {
+        if (extraWaitedMs >= MAX_WAIT_EXTRA_MS) {
+          log.warn(`Trade ${trade.tradeId} [PAPER] — ⚠️  Résolution introuvable après 2h`, {
+            question: trade.question.substring(0, 60),
+          });
+          this.openTrades = Math.max(0, this.openTrades - 1);
+          return;
+        }
+        setTimeout(() => attempt(extraWaitedMs + CHECK_INTERVAL_MS), CHECK_INTERVAL_MS);
+        return;
+      }
+
+      const won = result === 'yes';
+      const pnl = won
+        ? parseFloat(((1 - trade.entryPrice) * trade.shares).toFixed(4))
+        : -trade.stake;
+
+      trade.resolved = true;
+      trade.won      = won;
+      trade.pnl      = pnl;
+      this.paperPnl += pnl;
+      if (won) this.paperWins++; else this.paperLosses++;
+      this.openTrades = Math.max(0, this.openTrades - 1);
+
+      const resolved = this.paperTrades.filter(t => t.resolved).length;
+      const winRate  = resolved > 0
+        ? ((this.paperWins / resolved) * 100).toFixed(1) + '%'
+        : 'N/A';
+
+      log.info(`Trade ${trade.tradeId} [PAPER] — ${won ? '✅ WIN' : '❌ LOSS'}`, {
+        question:     trade.question.substring(0, 60),
+        domain:       trade.domain,
+        entryPrice:   trade.entryPrice,
+        outcome:      result.toUpperCase(),
+        pnl:          (pnl >= 0 ? '+' : '') + pnl.toFixed(4) + ' USDC.e',
+        totalPaperPnl:(this.paperPnl >= 0 ? '+' : '') + this.paperPnl.toFixed(4) + ' USDC.e',
+        wins:         this.paperWins,
+        losses:       this.paperLosses,
+        winRate,
+      });
+    };
+
+    // Premier check : expiry + 30s de buffer pour lag API
+    const delay = minsLeft * 60_000 + 30_000;
+    setTimeout(() => attempt(0), delay);
   }
 
   // ── Watchdog : polling + annulation si non rempli ─────────────
@@ -280,12 +386,19 @@ export class OrderExecutor {
 
   // ── Stats ─────────────────────────────────────────────────────
   get stats() {
+    const paperResolved = this.paperTrades.filter(t => t.resolved).length;
     return {
-      tradeCount:  this.tradeCount,
-      openTrades:  this.openTrades,
-      cancelCount: this.cancelCount,
-      totalLoss:   this.totalLoss,
-      stopped:     this.stopped,
+      tradeCount:    this.tradeCount,
+      openTrades:    this.openTrades,
+      cancelCount:   this.cancelCount,
+      totalLoss:     this.totalLoss,
+      stopped:       this.stopped,
+      // Paper trading P&L
+      paperTrades:   this.paperTrades.length,
+      paperResolved,
+      paperWins:     this.paperWins,
+      paperLosses:   this.paperLosses,
+      paperPnl:      this.paperPnl,
     };
   }
 }

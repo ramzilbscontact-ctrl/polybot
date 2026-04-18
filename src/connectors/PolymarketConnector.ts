@@ -218,6 +218,40 @@ export class PolymarketConnector {
     }
   }
 
+  // ── Résolution d'un marché (pour paper trading P&L) ──────────
+  async getMarketResolution(conditionId: string): Promise<'yes' | 'no' | 'pending' | 'error'> {
+    const url = `${GAMMA}/markets?condition_id=${encodeURIComponent(conditionId)}&limit=1`;
+    try {
+      const res = await this.withRetry(async () => {
+        const r = await fetch(url, {
+          headers: { 'User-Agent': 'polybot/2.0' },
+          signal: AbortSignal.timeout(this.REQ_TIMEOUT),
+        });
+        if (!r.ok) throw new Error(`Gamma HTTP ${r.status}`);
+        return r.json();
+      }, 'getMarketResolution');
+
+      const m = Array.isArray(res) && res.length > 0 ? res[0] : null;
+      if (!m) return 'error';
+
+      // Marché encore actif — pas encore résolu
+      if (m.active && !m.closed) return 'pending';
+
+      // resolutionPrice: 1.0 = YES, 0.0 = NO
+      const rp = parseFloat(String(m.resolutionPrice ?? m.resolution_price ?? ''));
+      if (!isNaN(rp)) return rp >= 0.5 ? 'yes' : 'no';
+
+      // outcome string
+      const outcome = String(m.outcome ?? m.marketOutcome ?? '').toLowerCase().trim();
+      if (outcome === 'yes' || outcome === '1' || outcome === 'true')  return 'yes';
+      if (outcome === 'no'  || outcome === '0' || outcome === 'false') return 'no';
+
+      return 'pending';
+    } catch {
+      return 'error';
+    }
+  }
+
   // ── Solde USDC.e ─────────────────────────────────────────────
   async getUsdcBalance(): Promise<number> {
     const USDC  = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';

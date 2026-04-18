@@ -86,8 +86,17 @@ async function main() {
     }
 
     scanCount++;
-    const { tradeCount, openTrades, totalLoss } = executor.stats;
-    log.info(`🔍 Scan #${scanCount}`, { openTrades, tradeCount, totalLoss: totalLoss.toFixed(2) });
+    const { tradeCount, openTrades, totalLoss, paperTrades, paperResolved, paperWins, paperLosses, paperPnl } = executor.stats;
+    if (DRY_RUN) {
+      const winRate = paperResolved > 0 ? ((paperWins / paperResolved) * 100).toFixed(1) + '%' : 'N/A';
+      log.info(`🔍 Scan #${scanCount} [PAPER]`, {
+        openTrades, tradeCount,
+        paperTrades, paperResolved, wins: paperWins, losses: paperLosses, winRate,
+        paperPnl: (paperPnl >= 0 ? '+' : '') + paperPnl.toFixed(4) + ' USDC.e',
+      });
+    } else {
+      log.info(`🔍 Scan #${scanCount}`, { openTrades, tradeCount, totalLoss: totalLoss.toFixed(2) });
+    }
 
     try {
       const signals = await strategy.scan();
@@ -113,12 +122,26 @@ async function main() {
   const shutdown = (sig: string) => {
     log.info(`Signal ${sig} reçu — arrêt propre en cours...`);
     clearInterval(interval);
-    const { tradeCount, totalLoss } = executor.stats;
-    log.info('Statistiques finales', {
-      scans:       scanCount,
-      trades:      tradeCount,
-      totalLoss:   totalLoss.toFixed(2) + ' USDC.e',
-    });
+    const { tradeCount, totalLoss, paperTrades, paperResolved, paperWins, paperLosses, paperPnl } = executor.stats;
+    if (DRY_RUN) {
+      const winRate = paperResolved > 0 ? ((paperWins / paperResolved) * 100).toFixed(1) + '%' : 'N/A';
+      log.info('📊 Statistiques finales [PAPER TRADING]', {
+        scans:         scanCount,
+        trades:        tradeCount,
+        paperTrades,
+        paperResolved,
+        wins:          paperWins,
+        losses:        paperLosses,
+        winRate,
+        paperPnl:      (paperPnl >= 0 ? '+' : '') + paperPnl.toFixed(4) + ' USDC.e',
+      });
+    } else {
+      log.info('Statistiques finales', {
+        scans:     scanCount,
+        trades:    tradeCount,
+        totalLoss: totalLoss.toFixed(2) + ' USDC.e',
+      });
+    }
     process.exit(0);
   };
 
