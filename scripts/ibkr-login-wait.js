@@ -1,34 +1,32 @@
 /**
- * ibkr-login-wait.js — Login IBKR avec attente code 2FA via fichier
+ * ibkr-login-wait.js — Login IBKR Client Portal Gateway
+ * Login en mode LIVE (pas de toggle Paper qui vide le formulaire)
+ * Le compte paper DUP564236 est accessible via account switcher après login
  */
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const { chromium } = require('playwright');
-const https = require('https');
-const fs    = require('fs');
+const https  = require('https');
+const fs     = require('fs');
 
-const GATEWAY   = process.env.IBKR_GATEWAY_URL || 'https://localhost:5000';
-const USERNAME  = process.env.IBKR_USERNAME    || '';
-const PASSWORD  = process.env.IBKR_PASSWORD    || '';
+const GATEWAY    = process.env.IBKR_GATEWAY_URL || 'https://localhost:5000';
+const USERNAME   = process.env.IBKR_USERNAME    || '';
+const PASSWORD   = process.env.IBKR_PASSWORD    || '';
 const CODE_FILE  = '/tmp/ibkr-2fa-code';
 const STATE_FILE = '/tmp/ibkr-login-state';
 
-function checkAuth() {
-  return new Promise(resolve => {
-    const req = https.request(`${GATEWAY}/v1/api/iserver/auth/status`,
-      { rejectUnauthorized: false },
-      res => { let d=''; res.on('data',x=>d+=x); res.on('end',()=>{ try{resolve(JSON.parse(d).authenticated===true);}catch{resolve(false);} }); });
-    req.on('error', () => resolve(false));
-    req.end();
-  });
-}
-
-function waitForFile(f, ms=120000) {
-  return new Promise((resolve,reject) => {
+function waitForFile(f, ms = 120000) {
+  return new Promise((resolve, reject) => {
     const t = Date.now();
     const check = () => {
-      if (fs.existsSync(f)) { const c=fs.readFileSync(f,'utf8').trim(); fs.unlinkSync(f); resolve(c); }
-      else if (Date.now()-t > ms) reject(new Error('Timeout 2FA'));
-      else setTimeout(check, 500);
+      if (fs.existsSync(f)) {
+        const c = fs.readFileSync(f, 'utf8').trim();
+        fs.unlinkSync(f);
+        resolve(c);
+      } else if (Date.now() - t > ms) {
+        reject(new Error('Timeout 2FA'));
+      } else {
+        setTimeout(check, 300);
+      }
     };
     check();
   });
@@ -39,7 +37,7 @@ function waitForFile(f, ms=120000) {
 
   const browser = await chromium.launch({
     headless: true,
-    args: ['--ignore-certificate-errors','--no-sandbox','--disable-dev-shm-usage'],
+    args: ['--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage'],
   });
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page    = await context.newPage();
@@ -51,121 +49,93 @@ function waitForFile(f, ms=120000) {
       waitUntil: 'networkidle', timeout: 30000,
     });
     await page.waitForSelector('#xyz-field-username', { timeout: 15000 });
+    console.log('   Page chargée (mode Live — pas de toggle)');
 
-    // Activer Paper mode en cliquant le wrapper du toggle
-    await page.locator('.toggle-wrapper').click({ force: true });
-    await page.waitForTimeout(1000);
-    const isPaper = await page.evaluate(() => !!document.querySelector('.xyz-paper-switch')?.checked);
-    console.log(`   Mode Paper : ${isPaper ? '✓' : '✗ (mode Live)'}`);
-    await page.waitForTimeout(800);
-
-    // Après toggle, re-attendre le formulaire (React peut re-monter le DOM)
-    await page.waitForSelector('#xyz-field-username', { state: 'visible', timeout: 5000 });
-    await page.waitForTimeout(500);
-
-    // Utiliser page.locator() (auto-retry, toujours frais)
+    // Remplir credentials avec pressSequentially (déclenche React onChange)
     console.log('▶ Saisie identifiants...');
-    const userField = page.locator('#xyz-field-username');
-    const passField = page.locator('#xyz-field-password');
+    await page.locator('#xyz-field-username').click();
+    await page.locator('#xyz-field-username').pressSequentially(USERNAME, { delay: 50 });
+    await page.locator('#xyz-field-password').click();
+    await page.locator('#xyz-field-password').pressSequentially(PASSWORD, { delay: 50 });
 
-    await userField.click();
-    await userField.fill(USERNAME);
-    await passField.click();
-    await passField.fill(PASSWORD);
+    const u = await page.locator('#xyz-field-username').inputValue();
+    const p = await page.locator('#xyz-field-password').inputValue();
+    console.log(`   Username: "${u}" (${u.length} chars), Password: ${p.length} chars`);
 
-    const uVal = await userField.inputValue();
-    const pLen = (await passField.inputValue()).length;
-    console.log(`   Username: "${uVal}", Password: ${pLen} chars`);
+    if (!u) throw new Error('Username still empty after pressSequentially');
 
     await page.click('.xyz-button-login');
-    console.log('▶ Credentials soumis, attente...');
+    console.log('▶ Credentials soumis...');
     await page.waitForTimeout(5000);
 
-    // ── Détection du type de 2FA disponible ───────────────────
-    await page.waitForTimeout(2000);
-
-    // Option 1: Push notification (IBKR Mobile app — pas de code requis)
-    const notifVisible = await page.isVisible('.xyzblock-notification .xyz-notificationimg', { timeout: 2000 }).catch(() => false);
-
-    // Option 2: Sélecteur OTP (SMS/email/voice)
-    const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 1000 }).catch(() => false);
-
-    // Option 3: Code silver déjà demandé
-    const silverVisible = await page.isVisible('.xyz-silver-response', { timeout: 1000 }).catch(() => false);
-
-    if (notifVisible) {
-      // ── Push notification: l'utilisateur approuve sur son téléphone ──
-      fs.writeFileSync(STATE_FILE, 'waiting-push');
-      console.log('\n📲 APPROBATION REQUISE — Ouvrez IBKR Mobile et approuvez la connexion');
-      console.log('   (en attente automatique jusqu\'à 90s)\n');
-      // Attendre que la page change (succès ou erreur)
-      await page.waitForSelector('.xyzblock-success, .xyzblock-error, .xyzblock-finished', {
-        timeout: 90_000,
-      }).catch(() => {});
-      await page.waitForTimeout(3000);
-
-    } else if (otpSel) {
-      // ── Sélectionner SMS ──
-      console.log('   Sélection méthode SMS...');
+    // OTP selector
+    const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 2000 }).catch(() => false);
+    if (otpSel) {
+      console.log('   Sélection SMS...');
       await page.click('.xyz-otp-select-text');
       await page.waitForTimeout(3000);
-      // Attendre le champ de code
-      await page.waitForSelector('.xyz-silver-response', { timeout: 10000 }).catch(() => {});
-      fs.writeFileSync(STATE_FILE, 'waiting-2fa');
-      console.log('\n📱 CODE SMS REQUIS — Envoyez-le ici immédiatement\n');
-      const code = await waitForFile(CODE_FILE, 120000);
-      console.log(`   Code : ${code}`);
-      await page.fill('.xyz-silver-response', code);
-      await page.locator('.xyzform-silver button[type="submit"]').click();
-      await page.waitForTimeout(8000);
-
-    } else if (silverVisible) {
-      // ── Code SMS déjà demandé ──
-      fs.writeFileSync(STATE_FILE, 'waiting-2fa');
-      console.log('\n📱 CODE SMS REQUIS — Envoyez-le ici immédiatement\n');
-      const code = await waitForFile(CODE_FILE, 120000);
-      console.log(`   Code : ${code}`);
-      await page.fill('.xyz-silver-response', code);
-      await page.locator('.xyzform-silver button[type="submit"]').click();
-      await page.waitForTimeout(8000);
-
-    } else {
-      const errMsg = await page.textContent('.xyz-errormessage').catch(() => '');
-      if (errMsg?.trim()) console.log('   Page error:', errMsg.trim());
-      await page.screenshot({ path: '/tmp/ibkr-2fa-state.png' });
-      console.log('   Screenshot état 2FA: /tmp/ibkr-2fa-state.png');
     }
 
-    // Vérifier l'auth VIA le contexte browser (a les bons cookies)
-    const authViaPage = await page.evaluate(async () => {
-      try {
-        const r = await fetch('/v1/api/iserver/auth/status');
-        const j = await r.json();
-        return j;
-      } catch(e) { return { error: e.message }; }
-    });
-    console.log('   Auth via browser:', JSON.stringify(authViaPage));
+    // Silver 2FA
+    const silverVisible = await page.isVisible('.xyz-silver-response', { timeout: 5000 }).catch(() => false);
+    if (silverVisible) {
+      fs.writeFileSync(STATE_FILE, 'waiting-2fa');
+      console.log('\n📱 CODE 2FA REQUIS\n   Envoyez le code maintenant\n');
 
-    const authed = authViaPage.authenticated === true;
+      const code = await waitForFile(CODE_FILE, 120000);
+      console.log(`   Code reçu : ${code}`);
+      await page.fill('.xyz-silver-response', code);
+      await page.locator('.xyzform-silver button[type="submit"]').click();
+      await page.waitForTimeout(8000);
+    }
+
+    // Dump current URL and page state
+    const url = page.url();
+    console.log(`   URL après login : ${url}`);
+    await page.screenshot({ path: '/tmp/ibkr-post-login.png' });
+
+    // Auth check via cookies + direct HTTPS request
+    const cookies = await context.cookies();
+    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    fs.writeFileSync('/tmp/ibkr-cookies.txt', cookieStr);
+
+    // Check auth via API with cookies
+    const authed = await new Promise(resolve => {
+      const req = https.request(
+        `${GATEWAY}/v1/api/iserver/auth/status`,
+        {
+          rejectUnauthorized: false,
+          headers: { Cookie: cookieStr },
+        },
+        res => {
+          let d = '';
+          res.on('data', x => d += x);
+          res.on('end', () => {
+            try {
+              const j = JSON.parse(d);
+              console.log('   Auth status:', JSON.stringify(j));
+              resolve(j.authenticated === true);
+            } catch { resolve(false); }
+          });
+        }
+      );
+      req.on('error', () => resolve(false));
+      req.end();
+    });
 
     if (authed) {
-      // Sauvegarder les cookies de session pour curl/API
-      const cookies = await context.cookies();
-      const sessCookie = cookies.find(c => c.name === 'x-sess-uuid' || c.name.includes('sess'));
-      if (sessCookie) {
-        fs.writeFileSync('/tmp/ibkr-session-cookie', `${sessCookie.name}=${sessCookie.value}`);
-        console.log(`   Cookie sauvé: ${sessCookie.name}`);
-      }
-      // Sauvegarder tous les cookies pour curl
-      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      fs.writeFileSync('/tmp/ibkr-cookies.txt', cookieStr);
-
       fs.writeFileSync(STATE_FILE, 'authenticated');
-      console.log('\n✅ Authentifié ! Session active.\n   Lancer : npm run nordic:dry\n');
+      console.log('\n✅ Authentifié avec succès !\n   Cookies: /tmp/ibkr-cookies.txt\n   Lancer : npm run nordic:dry\n');
     } else {
-      fs.writeFileSync(STATE_FILE, 'failed');
-      await page.screenshot({ path: '/tmp/ibkr-debug-final.png' });
-      console.log('\n❌ Échec. Screenshot: /tmp/ibkr-debug-final.png');
+      // Check page text for success message
+      const pageText = await page.textContent('body').catch(() => '');
+      if (pageText.includes('login succeeds') || pageText.includes('success')) {
+        fs.writeFileSync(STATE_FILE, 'authenticated');
+        console.log('\n✅ Login réussi (détecté via page text)\n   Lancer : npm run nordic:dry\n');
+      } else {
+        fs.writeFileSync(STATE_FILE, 'failed');
+        console.log('\n❌ Échec. Screenshot: /tmp/ibkr-post-login.png');
+      }
     }
 
   } catch (err) {
