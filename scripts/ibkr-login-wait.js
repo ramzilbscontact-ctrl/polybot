@@ -100,50 +100,54 @@ function waitForFile(f, ms = 120000) {
     // Dump current URL and page state
     const url = page.url();
     console.log(`   URL après login : ${url}`);
-    await page.screenshot({ path: '/tmp/ibkr-post-login.png' });
 
-    // Auth check via cookies + direct HTTPS request
+    // Vérifier auth ET faire tickle DEPUIS LA MÊME PAGE (même session cookie)
+    const sessionCheck = await page.evaluate(async () => {
+      // Tickle pour maintenir la session
+      await fetch('/v1/api/tickle', { method: 'POST' }).catch(() => {});
+      // Vérifier auth
+      try {
+        const r = await fetch('/v1/api/iserver/auth/status');
+        const j = await r.json();
+        return { authenticated: j.authenticated, status: r.status, data: j };
+      } catch(e) {
+        return { authenticated: false, error: e.message };
+      }
+    });
+    console.log('   Session check:', JSON.stringify(sessionCheck));
+
+    const pageText = await page.textContent('body').catch(() => '');
+    const loginOk = sessionCheck.authenticated === true ||
+                    pageText.includes('login succeeds') ||
+                    pageText.includes('Dispatcher');
+
+    // Sauvegarder l'état complet (cookies + localStorage) pour restauration
+    const storageState = await context.storageState();
+    fs.writeFileSync('/tmp/ibkr-session.json', JSON.stringify(storageState));
+
     const cookies = await context.cookies();
     const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     fs.writeFileSync('/tmp/ibkr-cookies.txt', cookieStr);
 
-    // Check auth via API with cookies
-    const authed = await new Promise(resolve => {
-      const req = https.request(
-        `${GATEWAY}/v1/api/iserver/auth/status`,
-        {
-          rejectUnauthorized: false,
-          headers: { Cookie: cookieStr },
-        },
-        res => {
-          let d = '';
-          res.on('data', x => d += x);
-          res.on('end', () => {
-            try {
-              const j = JSON.parse(d);
-              console.log('   Auth status:', JSON.stringify(j));
-              resolve(j.authenticated === true);
-            } catch { resolve(false); }
-          });
-        }
-      );
-      req.on('error', () => resolve(false));
-      req.end();
-    });
-
-    if (authed) {
+    if (loginOk) {
       fs.writeFileSync(STATE_FILE, 'authenticated');
-      console.log('\n✅ Authentifié avec succès !\n   Cookies: /tmp/ibkr-cookies.txt\n   Lancer : npm run nordic:dry\n');
-    } else {
-      // Check page text for success message
-      const pageText = await page.textContent('body').catch(() => '');
-      if (pageText.includes('login succeeds') || pageText.includes('success')) {
-        fs.writeFileSync(STATE_FILE, 'authenticated');
-        console.log('\n✅ Login réussi (détecté via page text)\n   Lancer : npm run nordic:dry\n');
-      } else {
-        fs.writeFileSync(STATE_FILE, 'failed');
-        console.log('\n❌ Échec. Screenshot: /tmp/ibkr-post-login.png');
+      console.log('\n✅ Authentifié !\n   Session: /tmp/ibkr-session.json\n   Lancer : npm run nordic:dry\n');
+
+      // Garder le browser vivant + tickle toutes les 60s
+      console.log('   Keepalive actif (tickle/60s) — Ctrl+C pour arrêter');
+      while (true) {
+        await page.waitForTimeout(60000);
+        const t = await page.evaluate(async () => {
+          const r = await fetch('/v1/api/tickle', { method: 'POST' });
+          return r.status;
+        }).catch(() => 0);
+        console.log(`   Tickle: ${t}`);
+        if (t === 0) { console.log('   Session perdue — relancer le login'); break; }
       }
+    } else {
+      fs.writeFileSync(STATE_FILE, 'failed');
+      await page.screenshot({ path: '/tmp/ibkr-post-login.png' });
+      console.log('\n❌ Échec. Screenshot: /tmp/ibkr-post-login.png');
     }
 
   } catch (err) {
