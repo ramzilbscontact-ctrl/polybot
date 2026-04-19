@@ -107,38 +107,37 @@ function waitForFile(f, ms = 120000) {
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
     const url = page.url();
     console.log(`   URL finale : ${url}`);
-
-    // Give the gateway a moment to establish the IServer session
     await page.waitForTimeout(3000);
 
-    // Call reauthenticate to ensure IServer session is initialized
-    const reauth = await page.evaluate(async () => {
+    // Use context.request (shares browser cookies) instead of page.evaluate fetch
+    const apiCall = async (method, path) => {
       try {
-        const r = await fetch('/v1/api/iserver/reauthenticate', { method: 'POST' });
-        return r.status;
-      } catch(e) { return 0; }
-    });
-    console.log(`   Reauthenticate: ${reauth}`);
-    await page.waitForTimeout(3000);
+        const r = method === 'POST'
+          ? await context.request.post(`${GATEWAY}${path}`)
+          : await context.request.get(`${GATEWAY}${path}`);
+        return r;
+      } catch(e) { return null; }
+    };
 
-    // Vérifier auth depuis la même page (même session cookie)
-    const sessionCheck = await page.evaluate(async () => {
-      await fetch('/v1/api/tickle', { method: 'POST' }).catch(() => {});
-      try {
-        const r = await fetch('/v1/api/iserver/auth/status');
-        const j = await r.json();
-        return { authenticated: j.authenticated, status: r.status, data: j };
-      } catch(e) {
-        return { authenticated: false, error: e.message };
+    // Reauthenticate to initialize IServer session
+    const reauth = await apiCall('POST', '/v1/api/iserver/reauthenticate');
+    console.log(`   Reauthenticate: ${reauth ? reauth.status() : 0}`);
+    await page.waitForTimeout(4000);
+
+    // Poll auth/status until authenticated or timeout (10 attempts × 3s)
+    let authenticated = false;
+    for (let i = 0; i < 10; i++) {
+      const r = await apiCall('GET', '/v1/api/iserver/auth/status');
+      if (r) {
+        const body = await r.text();
+        console.log(`   Auth status [${i+1}]: ${r.status()} ${body.substring(0, 80)}`);
+        try {
+          const j = JSON.parse(body);
+          if (j.authenticated === true) { authenticated = true; break; }
+        } catch {}
       }
-    });
-    console.log('   Session check:', JSON.stringify(sessionCheck));
-
-    const pageText = await page.textContent('body').catch(() => '');
-    const loginOk = sessionCheck.authenticated === true ||
-                    pageText.includes('login succeeds') ||
-                    url.includes('Dispatcher') ||
-                    url.includes('portal');
+      await page.waitForTimeout(3000);
+    }
 
     // Sauvegarder cookies
     const cookies = await context.cookies();
@@ -147,29 +146,23 @@ function waitForFile(f, ms = 120000) {
     const storageState = await context.storageState();
     fs.writeFileSync('/tmp/ibkr-session.json', JSON.stringify(storageState));
 
+    const loginOk = authenticated || url.includes('Dispatcher') || url.includes('portal');
+
     if (loginOk) {
       fs.writeFileSync(STATE_FILE, 'authenticated');
-      console.log('\n✅ Authentifié !\n   Session: /tmp/ibkr-session.json\n   Lancer : npm run nordic:dry\n');
+      console.log(`\n✅ ${authenticated ? 'Authentifié (API confirmée)' : 'Session active (Dispatcher)'}\n   Session: /tmp/ibkr-session.json\n   Lancer : npm run nordic:dry\n`);
 
-      // Garder le browser vivant + tickle toutes les 60s
-      console.log('   Keepalive actif (tickle/60s) — Ctrl+C pour arrêter');
+      // Keepalive: tickle via context.request every 55s
+      console.log('   Keepalive actif (tickle/55s) — Ctrl+C pour arrêter');
       while (true) {
         await page.waitForTimeout(55000);
-        const t = await page.evaluate(async () => {
-          try {
-            const r = await fetch('/v1/api/tickle', { method: 'POST' });
-            return r.status;
-          } catch(e) { return 0; }
-        }).catch(() => 0);
+        const tr = await apiCall('POST', '/v1/api/tickle');
+        const t = tr ? tr.status() : 0;
         console.log(`   Tickle: ${t}`);
-        if (t === 0) { console.log('   Session perdue — relancer le login'); break; }
+        if (t === 0) { console.log('   Connexion perdue — relancer le login'); break; }
         if (t === 401) {
-          // Try reauthenticate before giving up
-          const ra = await page.evaluate(async () => {
-            try { const r = await fetch('/v1/api/iserver/reauthenticate', { method: 'POST' }); return r.status; }
-            catch(e) { return 0; }
-          }).catch(() => 0);
-          console.log(`   Reauthenticate: ${ra}`);
+          const ra = await apiCall('POST', '/v1/api/iserver/reauthenticate');
+          console.log(`   Reauthenticate: ${ra ? ra.status() : 0}`);
         }
       }
     } else {
