@@ -41,7 +41,8 @@ function waitForFile(f, ms=120000) {
     headless: true,
     args: ['--ignore-certificate-errors','--no-sandbox','--disable-dev-shm-usage'],
   });
-  const page = await (await browser.newContext({ ignoreHTTPSErrors: true })).newPage();
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page    = await context.newPage();
 
   try {
     fs.writeFileSync(STATE_FILE, 'loading');
@@ -99,14 +100,36 @@ function waitForFile(f, ms=120000) {
       console.log(`   Code : ${code}`);
       await page.fill('.xyz-silver-response', code);
       await page.locator('.xyzform-silver button[type="submit"]').click();
-      await page.waitForTimeout(5000);
+      await page.waitForTimeout(8000);
     } else {
       const errMsg = await page.textContent('.xyz-errormessage').catch(() => '');
       if (errMsg?.trim()) console.log('   Page error:', errMsg.trim());
     }
 
-    const authed = await checkAuth();
+    // Vérifier l'auth VIA le contexte browser (a les bons cookies)
+    const authViaPage = await page.evaluate(async () => {
+      try {
+        const r = await fetch('/v1/api/iserver/auth/status');
+        const j = await r.json();
+        return j;
+      } catch(e) { return { error: e.message }; }
+    });
+    console.log('   Auth via browser:', JSON.stringify(authViaPage));
+
+    const authed = authViaPage.authenticated === true;
+
     if (authed) {
+      // Sauvegarder les cookies de session pour curl/API
+      const cookies = await context.cookies();
+      const sessCookie = cookies.find(c => c.name === 'x-sess-uuid' || c.name.includes('sess'));
+      if (sessCookie) {
+        fs.writeFileSync('/tmp/ibkr-session-cookie', `${sessCookie.name}=${sessCookie.value}`);
+        console.log(`   Cookie sauvé: ${sessCookie.name}`);
+      }
+      // Sauvegarder tous les cookies pour curl
+      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+      fs.writeFileSync('/tmp/ibkr-cookies.txt', cookieStr);
+
       fs.writeFileSync(STATE_FILE, 'authenticated');
       console.log('\n✅ Authentifié ! Session active.\n   Lancer : npm run nordic:dry\n');
     } else {
