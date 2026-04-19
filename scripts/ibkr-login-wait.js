@@ -102,14 +102,15 @@ function waitForFile(f, ms = 120000) {
       await page.waitForTimeout(8000);
     }
 
-    // Wait for Dispatcher to complete its redirect to the main app
-    console.log('▶ Attente navigation post-login...');
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+    // Wait then explicitly navigate to gateway root to trigger IServer session init
+    console.log('▶ Navigation vers la page principale...');
+    await page.waitForTimeout(2000);
+    await page.goto(`${GATEWAY}/`, { waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
     const url = page.url();
     console.log(`   URL finale : ${url}`);
     await page.waitForTimeout(3000);
 
-    // Use context.request (shares browser cookies) instead of page.evaluate fetch
+    // Use context.request (shares browser cookies)
     const apiCall = async (method, path) => {
       try {
         const r = method === 'POST'
@@ -122,15 +123,15 @@ function waitForFile(f, ms = 120000) {
     // Reauthenticate to initialize IServer session
     const reauth = await apiCall('POST', '/v1/api/iserver/reauthenticate');
     console.log(`   Reauthenticate: ${reauth ? reauth.status() : 0}`);
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(5000);
 
-    // Poll auth/status until authenticated or timeout (10 attempts × 3s)
+    // Poll auth/status until authenticated or timeout (15 attempts × 3s = 45s)
     let authenticated = false;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 15; i++) {
       const r = await apiCall('GET', '/v1/api/iserver/auth/status');
       if (r) {
         const body = await r.text();
-        console.log(`   Auth status [${i+1}]: ${r.status()} ${body.substring(0, 80)}`);
+        console.log(`   Auth status [${i+1}]: ${r.status()} ${body.substring(0, 100)}`);
         try {
           const j = JSON.parse(body);
           if (j.authenticated === true) { authenticated = true; break; }
