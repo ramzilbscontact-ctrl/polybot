@@ -51,7 +51,7 @@ function waitForFile(f, ms = 120000) {
     await page.waitForSelector('#xyz-field-username', { timeout: 15000 });
     console.log('   Page chargée (mode Live — pas de toggle)');
 
-    // Remplir credentials avec pressSequentially (déclenche React onChange)
+    // Remplir credentials AVANT le toggle (pressSequentially déclenche React onChange)
     console.log('▶ Saisie identifiants...');
     await page.locator('#xyz-field-username').click();
     await page.locator('#xyz-field-username').pressSequentially(USERNAME, { delay: 50 });
@@ -61,8 +61,16 @@ function waitForFile(f, ms = 120000) {
     const u = await page.locator('#xyz-field-username').inputValue();
     const p = await page.locator('#xyz-field-password').inputValue();
     console.log(`   Username: "${u}" (${u.length} chars), Password: ${p.length} chars`);
+    if (!u) throw new Error('Username still empty');
 
-    if (!u) throw new Error('Username still empty after pressSequentially');
+    // Forcer Paper mode via le champ caché loginType=2 (sans re-render React)
+    await page.evaluate(() => {
+      const lt = document.querySelector('input.xyz-logintype');
+      if (lt) lt.value = '2';
+      const cb = document.querySelector('.xyz-paper-switch');
+      if (cb) cb.checked = true;
+    });
+    console.log('   Paper mode forcé via loginType=2');
 
     await page.click('.xyz-button-login');
     console.log('▶ Credentials soumis...');
