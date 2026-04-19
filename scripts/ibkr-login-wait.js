@@ -1,7 +1,7 @@
 /**
  * ibkr-login-wait.js — Login IBKR Client Portal Gateway
- * Login en mode LIVE (pas de toggle Paper qui vide le formulaire)
- * Le compte paper DUP564236 est accessible via account switcher après login
+ * Strategy: click Paper toggle FIRST (before filling), so form reset is harmless.
+ * Paper account DUP564236 — same credentials as live.
  */
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const { chromium } = require('playwright');
@@ -49,9 +49,32 @@ function waitForFile(f, ms = 120000) {
       waitUntil: 'networkidle', timeout: 30000,
     });
     await page.waitForSelector('#xyz-field-username', { timeout: 15000 });
-    console.log('   Page chargée (mode Live — pas de toggle)');
+    console.log('   Page chargée');
 
-    // Remplir credentials AVANT le toggle (pressSequentially déclenche React onChange)
+    // Click Paper toggle FIRST (before filling) so any form reset doesn't matter
+    const toggleVisible = await page.isVisible('.toggle-wrapper', { timeout: 3000 }).catch(() => false);
+    if (toggleVisible) {
+      // Check if already in paper mode by looking at toggle state
+      const isLive = await page.evaluate(() => {
+        const lt = document.querySelector('input.xyz-logintype');
+        return !lt || lt.value !== '2';
+      });
+      if (isLive) {
+        console.log('▶ Passage en mode Paper (toggle avant remplissage)...');
+        await page.locator('.toggle-wrapper').click({ force: true });
+        await page.waitForTimeout(1500);
+        // Verify toggle switched
+        const loginTypeAfter = await page.evaluate(() => {
+          const lt = document.querySelector('input.xyz-logintype');
+          return lt ? lt.value : 'not found';
+        });
+        console.log(`   loginType après toggle: ${loginTypeAfter}`);
+      } else {
+        console.log('   Déjà en mode Paper');
+      }
+    }
+
+    // Now fill credentials (form is already in Paper mode)
     console.log('▶ Saisie identifiants...');
     await page.locator('#xyz-field-username').click();
     await page.locator('#xyz-field-username').pressSequentially(USERNAME, { delay: 50 });
@@ -62,15 +85,6 @@ function waitForFile(f, ms = 120000) {
     const p = await page.locator('#xyz-field-password').inputValue();
     console.log(`   Username: "${u}" (${u.length} chars), Password: ${p.length} chars`);
     if (!u) throw new Error('Username still empty');
-
-    // Forcer Paper mode via le champ caché loginType=2 (sans re-render React)
-    await page.evaluate(() => {
-      const lt = document.querySelector('input.xyz-logintype');
-      if (lt) lt.value = '2';
-      const cb = document.querySelector('.xyz-paper-switch');
-      if (cb) cb.checked = true;
-    });
-    console.log('   Paper mode forcé via loginType=2');
 
     await page.click('.xyz-button-login');
     console.log('▶ Credentials soumis...');
