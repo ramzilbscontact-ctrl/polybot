@@ -81,29 +81,59 @@ function waitForFile(f, ms=120000) {
     console.log('▶ Credentials soumis, attente...');
     await page.waitForTimeout(5000);
 
-    // OTP selector (SMS/email)
-    const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 2000 }).catch(() => false);
-    if (otpSel) {
-      console.log('   Sélection SMS OTP...');
+    // ── Détection du type de 2FA disponible ───────────────────
+    await page.waitForTimeout(2000);
+
+    // Option 1: Push notification (IBKR Mobile app — pas de code requis)
+    const notifVisible = await page.isVisible('.xyzblock-notification .xyz-notificationimg', { timeout: 2000 }).catch(() => false);
+
+    // Option 2: Sélecteur OTP (SMS/email/voice)
+    const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 1000 }).catch(() => false);
+
+    // Option 3: Code silver déjà demandé
+    const silverVisible = await page.isVisible('.xyz-silver-response', { timeout: 1000 }).catch(() => false);
+
+    if (notifVisible) {
+      // ── Push notification: l'utilisateur approuve sur son téléphone ──
+      fs.writeFileSync(STATE_FILE, 'waiting-push');
+      console.log('\n📲 APPROBATION REQUISE — Ouvrez IBKR Mobile et approuvez la connexion');
+      console.log('   (en attente automatique jusqu\'à 90s)\n');
+      // Attendre que la page change (succès ou erreur)
+      await page.waitForSelector('.xyzblock-success, .xyzblock-error, .xyzblock-finished', {
+        timeout: 90_000,
+      }).catch(() => {});
+      await page.waitForTimeout(3000);
+
+    } else if (otpSel) {
+      // ── Sélectionner SMS ──
+      console.log('   Sélection méthode SMS...');
       await page.click('.xyz-otp-select-text');
       await page.waitForTimeout(3000);
-    }
-
-    // Silver 2FA field
-    const silverVisible = await page.isVisible('.xyz-silver-response', { timeout: 5000 }).catch(() => false);
-    if (silverVisible) {
+      // Attendre le champ de code
+      await page.waitForSelector('.xyz-silver-response', { timeout: 10000 }).catch(() => {});
       fs.writeFileSync(STATE_FILE, 'waiting-2fa');
-      console.log('\n📱 CODE 2FA REQUIS — SMS envoyé sur votre téléphone');
-      console.log('   → Envoyez le code ici dans le chat\n');
-
+      console.log('\n📱 CODE SMS REQUIS — Envoyez-le ici immédiatement\n');
       const code = await waitForFile(CODE_FILE, 120000);
       console.log(`   Code : ${code}`);
       await page.fill('.xyz-silver-response', code);
       await page.locator('.xyzform-silver button[type="submit"]').click();
       await page.waitForTimeout(8000);
+
+    } else if (silverVisible) {
+      // ── Code SMS déjà demandé ──
+      fs.writeFileSync(STATE_FILE, 'waiting-2fa');
+      console.log('\n📱 CODE SMS REQUIS — Envoyez-le ici immédiatement\n');
+      const code = await waitForFile(CODE_FILE, 120000);
+      console.log(`   Code : ${code}`);
+      await page.fill('.xyz-silver-response', code);
+      await page.locator('.xyzform-silver button[type="submit"]').click();
+      await page.waitForTimeout(8000);
+
     } else {
       const errMsg = await page.textContent('.xyz-errormessage').catch(() => '');
       if (errMsg?.trim()) console.log('   Page error:', errMsg.trim());
+      await page.screenshot({ path: '/tmp/ibkr-2fa-state.png' });
+      console.log('   Screenshot état 2FA: /tmp/ibkr-2fa-state.png');
     }
 
     // Vérifier l'auth VIA le contexte browser (a les bons cookies)
