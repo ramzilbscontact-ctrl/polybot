@@ -102,15 +102,28 @@ function waitForFile(f, ms = 120000) {
       await page.waitForTimeout(8000);
     }
 
-    // Dump current URL and page state
+    // Wait for Dispatcher to complete its redirect to the main app
+    console.log('▶ Attente navigation post-login...');
+    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
     const url = page.url();
-    console.log(`   URL après login : ${url}`);
+    console.log(`   URL finale : ${url}`);
 
-    // Vérifier auth ET faire tickle DEPUIS LA MÊME PAGE (même session cookie)
+    // Give the gateway a moment to establish the IServer session
+    await page.waitForTimeout(3000);
+
+    // Call reauthenticate to ensure IServer session is initialized
+    const reauth = await page.evaluate(async () => {
+      try {
+        const r = await fetch('/v1/api/iserver/reauthenticate', { method: 'POST' });
+        return r.status;
+      } catch(e) { return 0; }
+    });
+    console.log(`   Reauthenticate: ${reauth}`);
+    await page.waitForTimeout(3000);
+
+    // Vérifier auth depuis la même page (même session cookie)
     const sessionCheck = await page.evaluate(async () => {
-      // Tickle pour maintenir la session
       await fetch('/v1/api/tickle', { method: 'POST' }).catch(() => {});
-      // Vérifier auth
       try {
         const r = await fetch('/v1/api/iserver/auth/status');
         const j = await r.json();
@@ -124,15 +137,15 @@ function waitForFile(f, ms = 120000) {
     const pageText = await page.textContent('body').catch(() => '');
     const loginOk = sessionCheck.authenticated === true ||
                     pageText.includes('login succeeds') ||
-                    pageText.includes('Dispatcher');
+                    url.includes('Dispatcher') ||
+                    url.includes('portal');
 
-    // Sauvegarder l'état complet (cookies + localStorage) pour restauration
-    const storageState = await context.storageState();
-    fs.writeFileSync('/tmp/ibkr-session.json', JSON.stringify(storageState));
-
+    // Sauvegarder cookies
     const cookies = await context.cookies();
     const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     fs.writeFileSync('/tmp/ibkr-cookies.txt', cookieStr);
+    const storageState = await context.storageState();
+    fs.writeFileSync('/tmp/ibkr-session.json', JSON.stringify(storageState));
 
     if (loginOk) {
       fs.writeFileSync(STATE_FILE, 'authenticated');
@@ -141,13 +154,23 @@ function waitForFile(f, ms = 120000) {
       // Garder le browser vivant + tickle toutes les 60s
       console.log('   Keepalive actif (tickle/60s) — Ctrl+C pour arrêter');
       while (true) {
-        await page.waitForTimeout(60000);
+        await page.waitForTimeout(55000);
         const t = await page.evaluate(async () => {
-          const r = await fetch('/v1/api/tickle', { method: 'POST' });
-          return r.status;
+          try {
+            const r = await fetch('/v1/api/tickle', { method: 'POST' });
+            return r.status;
+          } catch(e) { return 0; }
         }).catch(() => 0);
         console.log(`   Tickle: ${t}`);
         if (t === 0) { console.log('   Session perdue — relancer le login'); break; }
+        if (t === 401) {
+          // Try reauthenticate before giving up
+          const ra = await page.evaluate(async () => {
+            try { const r = await fetch('/v1/api/iserver/reauthenticate', { method: 'POST' }); return r.status; }
+            catch(e) { return 0; }
+          }).catch(() => 0);
+          console.log(`   Reauthenticate: ${ra}`);
+        }
       }
     } else {
       fs.writeFileSync(STATE_FILE, 'failed');
