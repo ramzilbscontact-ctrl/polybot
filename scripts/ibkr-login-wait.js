@@ -51,40 +51,31 @@ function waitForFile(f, ms = 120000) {
     await page.waitForSelector('#xyz-field-username', { timeout: 15000 });
     console.log('   Page chargée');
 
-    // Click Paper toggle FIRST (before filling) so any form reset doesn't matter
-    const toggleVisible = await page.isVisible('.toggle-wrapper', { timeout: 3000 }).catch(() => false);
-    if (toggleVisible) {
-      // Check if already in paper mode by looking at toggle state
-      const isLive = await page.evaluate(() => {
-        const lt = document.querySelector('input.xyz-logintype');
-        return !lt || lt.value !== '2';
-      });
-      if (isLive) {
-        console.log('▶ Passage en mode Paper (toggle avant remplissage)...');
-        await page.locator('.toggle-wrapper').click({ force: true });
-        await page.waitForTimeout(1500);
-        // Verify toggle switched
-        const loginTypeAfter = await page.evaluate(() => {
-          const lt = document.querySelector('input.xyz-logintype');
-          return lt ? lt.value : 'not found';
-        });
-        console.log(`   loginType après toggle: ${loginTypeAfter}`);
-      } else {
-        console.log('   Déjà en mode Paper');
-      }
-    }
-
-    // Now fill credentials (form is already in Paper mode)
+    // Fill credentials FIRST with fill() (triggers React onChange)
     console.log('▶ Saisie identifiants...');
-    await page.locator('#xyz-field-username').click();
-    await page.locator('#xyz-field-username').pressSequentially(USERNAME, { delay: 50 });
-    await page.locator('#xyz-field-password').click();
-    await page.locator('#xyz-field-password').pressSequentially(PASSWORD, { delay: 50 });
+    await page.locator('#xyz-field-username').fill(USERNAME);
+    await page.locator('#xyz-field-password').fill(PASSWORD);
 
     const u = await page.locator('#xyz-field-username').inputValue();
     const p = await page.locator('#xyz-field-password').inputValue();
     console.log(`   Username: "${u}" (${u.length} chars), Password: ${p.length} chars`);
     if (!u) throw new Error('Username still empty');
+
+    // THEN switch to Paper mode (fill() already committed React state, toggle won't reset it)
+    const toggleVisible = await page.isVisible('.toggle-wrapper', { timeout: 3000 }).catch(() => false);
+    if (toggleVisible) {
+      console.log('▶ Passage en mode Paper...');
+      await page.locator('.toggle-wrapper').click({ force: true });
+      await page.waitForTimeout(1000);
+      const u2 = await page.locator('#xyz-field-username').inputValue();
+      console.log(`   Username après toggle: "${u2}" (${u2.length} chars)`);
+      if (!u2) {
+        // Toggle cleared the form — refill
+        console.log('   Refill après toggle...');
+        await page.locator('#xyz-field-username').fill(USERNAME);
+        await page.locator('#xyz-field-password').fill(PASSWORD);
+      }
+    }
 
     await page.click('.xyz-button-login');
     console.log('▶ Credentials soumis...');
