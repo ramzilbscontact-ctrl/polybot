@@ -45,9 +45,8 @@ function waitForFile(f, ms = 300000) {
     fs.writeFileSync(STATE_FILE, 'loading');
     console.log('▶ Chargement page login...');
     await page.goto(`${GATEWAY}/sso/Login?forwardTo=22&RL=1&ip2loc=EU`, {
-      waitUntil: 'networkidle', timeout: 45000,
+      waitUntil: 'domcontentloaded', timeout: 45000,
     });
-    await page.waitForTimeout(4000);
     await page.waitForSelector('#xyz-field-username', { timeout: 30000 });
     console.log('   Page chargée');
 
