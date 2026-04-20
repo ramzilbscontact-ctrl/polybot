@@ -13,7 +13,7 @@ const PASSWORD   = process.env.IBKR_PASSWORD    || '';
 const CODE_FILE  = '/tmp/ibkr-2fa-code';
 const STATE_FILE = '/tmp/ibkr-login-state';
 
-function waitForFile(f, ms = 120000) {
+function waitForFile(f, ms = 300000) {
   return new Promise((resolve, reject) => {
     const t = Date.now();
     const check = () => {
@@ -98,7 +98,7 @@ function waitForFile(f, ms = 120000) {
     if (silverVisible) {
       fs.writeFileSync(STATE_FILE, 'waiting-2fa');
       console.log('\n📱 CODE 2FA — envoyez : echo "VOTRE_CODE" > /tmp/ibkr-2fa-code\n');
-      const code = await waitForFile(CODE_FILE, 120000);
+      const code = await waitForFile(CODE_FILE, 300000);
       console.log(`   Code reçu : ${code}`);
       await page.fill('.xyz-silver-response', code);
       await page.locator('.xyzform-silver button[type="submit"]').click();
