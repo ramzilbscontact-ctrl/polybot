@@ -45,9 +45,10 @@ function waitForFile(f, ms = 300000) {
     fs.writeFileSync(STATE_FILE, 'loading');
     console.log('▶ Chargement page login...');
     await page.goto(`${GATEWAY}/sso/Login?forwardTo=22&RL=1&ip2loc=EU`, {
-      waitUntil: 'networkidle', timeout: 30000,
+      waitUntil: 'networkidle', timeout: 45000,
     });
-    await page.waitForSelector('#xyz-field-username', { timeout: 15000 });
+    await page.waitForTimeout(4000);
+    await page.waitForSelector('#xyz-field-username', { timeout: 30000 });
     console.log('   Page chargée');
 
     // Fill credentials first (triggers React onChange)
@@ -75,33 +76,52 @@ function waitForFile(f, ms = 300000) {
 
     await page.click('.xyz-button-login');
     console.log('▶ Credentials soumis — attente 2FA...');
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(8000);
+    await page.screenshot({ path: '/tmp/ibkr-2fa-page.png' });
+    console.log('   Screenshot 2FA sauvé: /tmp/ibkr-2fa-page.png');
 
-    // OTP method selector
+    // Log visible 2FA elements for debugging
+    const allText = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => '');
+    console.log(`   Page text: ${allText.replace(/\n/g, '|')}`);
+
+    // OTP method selector — try to pick push if available
     const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 2000 }).catch(() => false);
     if (otpSel) {
+      console.log('   OTP selector visible, clicking...');
       await page.click('.xyz-otp-select-text');
       await page.waitForTimeout(3000);
+      await page.screenshot({ path: '/tmp/ibkr-otp-select.png' });
     }
 
     // Push notification (tap sur mobile IBKR — plus de code SMS nécessaire)
-    const pushVisible = await page.isVisible('.xyzblock-notification', { timeout: 3000 }).catch(() => false);
+    const pushVisible = await page.isVisible('.xyzblock-notification', { timeout: 5000 }).catch(() => false);
+    console.log(`   Push visible: ${pushVisible}`);
     if (pushVisible) {
       fs.writeFileSync(STATE_FILE, 'waiting-push');
-      console.log('\n📲 APPROBATION PUSH REQUISE\n   Ouvrez l\'app IBKR sur votre téléphone et approuvez la connexion\n');
+      console.log('\n📲 APPROBATION PUSH REQUISE — Ouvrez l\'app IBKR et approuvez\n');
       await page.waitForSelector('.xyzblock-success, .xyzform-silver', { timeout: 90000 });
       console.log('   Push approuvé');
     }
 
     // SMS/email code (Silver OTP)
     const silverVisible = await page.isVisible('.xyz-silver-response', { timeout: 5000 }).catch(() => false);
+    console.log(`   SMS visible: ${silverVisible}`);
     if (silverVisible) {
+      // Screenshot showing SMS form with timestamp for debugging
+      await page.screenshot({ path: '/tmp/ibkr-sms-form.png' });
       fs.writeFileSync(STATE_FILE, 'waiting-2fa');
-      console.log('\n📱 CODE 2FA — envoyez : echo "VOTRE_CODE" > /tmp/ibkr-2fa-code\n');
+      const ts = new Date().toISOString();
+      console.log(`\n📱 CODE 2FA [${ts}] — envoyez : echo "VOTRE_CODE" > /tmp/ibkr-2fa-code\n`);
       const code = await waitForFile(CODE_FILE, 300000);
-      console.log(`   Code reçu : ${code}`);
+      const age = Math.round((Date.now() - new Date(ts).getTime()) / 1000);
+      console.log(`   Code reçu : ${code} (après ${age}s)`);
       await page.fill('.xyz-silver-response', code);
-      await page.locator('.xyzform-silver button[type="submit"]').click();
+      // Try both possible submit selectors
+      const submitted = await page.locator('.xyzform-silver button[type="submit"]').click({ timeout: 3000 }).then(() => true).catch(() => false);
+      if (!submitted) {
+        console.log('   Fallback: click Login button');
+        await page.locator('button:has-text("Login"), button[type="submit"]').first().click({ timeout: 3000 }).catch(() => {});
+      }
     }
 
     // Wait for Dispatcher (confirms SSO success)
