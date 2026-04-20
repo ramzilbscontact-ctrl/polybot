@@ -98,20 +98,22 @@ export class IBKRConnector extends EventEmitter {
 
   // ── Initialisation de la session ──────────────────────────────
   async connect(): Promise<void> {
-    // Vérifie/initialise la session Client Portal
     try {
-      const auth = await this._rest('/v1/api/iserver/auth/status');
-      if (auth.authenticated) {
+      // Init brokerage session (required — SSO alone isn't enough for /iserver/*)
+      await this._rest('/v1/api/iserver/auth/ssodh/init', 'POST', { publish: true, compete: true }).catch(() => {});
+      // Warm up brokerage session
+      await this._rest('/v1/api/iserver/accounts').catch(() => {});
+      // auth/status must be POST, not GET
+      const auth = await this._rest('/v1/api/iserver/auth/status', 'POST');
+      if (auth?.authenticated) {
         this.sessionValid = true;
-        log.info('IBKR — session active ✓', { account: auth.competing });
+        log.info('IBKR — session active ✓', { connected: auth.connected, competing: auth.competing });
       } else {
-        log.warn('IBKR — session non authentifiée. Lance le Client Portal Gateway et connecte-toi via https://localhost:5000');
+        log.warn('IBKR — session non authentifiée', { auth });
+        log.warn('Lance: bash scripts/ibkr-session-manager.sh puis connecte-toi');
       }
     } catch (e: any) {
-      log.error('IBKR — gateway inaccessible', {
-        error:  e.message,
-        advice: 'Lance: java -jar ibclientportal/root/dist/ibclientportal.jar conf.yaml',
-      });
+      log.error('IBKR — gateway inaccessible', { error: e.message });
       throw e;
     }
 
@@ -169,8 +171,9 @@ export class IBKRConnector extends EventEmitter {
 
     const body = {
       orders: [{
+        acctId:    this.accountId,
         conid:     order.conid,
-        secType:   `${order.conid}:STK`,
+        secType:   'STK',
         orderType: order.orderType,
         side:      order.side,
         quantity:  order.quantity,
@@ -300,14 +303,16 @@ export class IBKRConnector extends EventEmitter {
 
   // ── REST helper ───────────────────────────────────────────────
   private async _rest(path: string, method: 'GET' | 'POST' = 'GET', body?: object): Promise<any> {
+    // Self-signed cert: Node 18+ fetch ignores agent:false, so we set NODE_TLS_REJECT_UNAUTHORIZED=0 globally
+    if (this.baseUrl.startsWith('https://localhost') && process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0') {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    }
     const url = this.baseUrl + path;
-    const res  = await fetch(url, {
+    const res = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'polybot/2.0' },
       body:    body ? JSON.stringify(body) : undefined,
       signal:  AbortSignal.timeout(10_000),
-      // @ts-ignore — nécessaire pour ignorer le certificat auto-signé
-      ...(this.baseUrl.startsWith('https://localhost') ? { agent: false } : {}),
     });
     if (!res.ok && res.status !== 400) {
       throw new Error(`IBKR REST ${method} ${path} → HTTP ${res.status}`);

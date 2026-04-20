@@ -31,15 +31,6 @@ function waitForFile(f, ms = 120000) {
   });
 }
 
-async function apiCall(context, method, path) {
-  try {
-    const r = method === 'POST'
-      ? await context.request.post(`${GATEWAY}${path}`)
-      : await context.request.get(`${GATEWAY}${path}`);
-    return r;
-  } catch { return null; }
-}
-
 (async () => {
   [CODE_FILE, STATE_FILE].forEach(f => { try { fs.unlinkSync(f); } catch {} });
 
@@ -123,40 +114,69 @@ async function apiCall(context, method, path) {
       throw new Error(`Login failed — URL: ${urlDispatcher}`);
     }
 
-    // Navigate to demo app to trigger IServer session initialization
-    console.log('▶ Initialisation session IServer via /demo...');
-    await page.goto(`${GATEWAY}/demo`, { waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
-    await page.waitForTimeout(5000);
-    console.log(`   URL demo : ${page.url()}`);
+    // CRITICAL: Wait for network idle so Dispatcher completes its init
+    console.log('▶ Attente stabilisation Dispatcher...');
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(3000);
 
-    // Poll auth/status (IServer session may take up to 30s to init)
-    console.log('▶ Vérification session API...');
-    let authenticated = false;
-    for (let i = 0; i < 10; i++) {
-      const r = await apiCall(context, 'GET', '/v1/api/iserver/auth/status');
-      const body = r ? await r.text() : '';
-      const status = r ? r.status() : 0;
-      console.log(`   Auth [${i+1}]: ${status} ${body.substring(0, 120)}`);
+    // Helper for JSON API calls via context.request (shares cookies)
+    const apiCall = async (method, path, body) => {
       try {
-        if (JSON.parse(body).authenticated === true) { authenticated = true; break; }
-      } catch {}
-      if (i < 9) await page.waitForTimeout(3000);
-    }
+        const opts = { headers: { 'Content-Type': 'application/json' } };
+        if (body) opts.data = body;
+        const r = method === 'POST'
+          ? await context.request.post(`${GATEWAY}${path}`, opts)
+          : await context.request.get(`${GATEWAY}${path}`, opts);
+        return r;
+      } catch { return null; }
+    };
+
+    // STEP 1: Initialize brokerage session (ssodh/init) — this is the MISSING call
+    console.log('▶ Init brokerage session (ssodh/init)...');
+    const init = await apiCall('POST', '/v1/api/iserver/auth/ssodh/init', { publish: true, compete: true });
+    const initBody = init ? await init.text() : '';
+    console.log(`   ssodh/init: ${init ? init.status() : 0} ${initBody.substring(0, 150)}`);
+    await page.waitForTimeout(3000);
+
+    // STEP 2: SSO validate
+    const ssoV = await apiCall('GET', '/v1/api/sso/validate');
+    console.log(`   sso/validate: ${ssoV ? ssoV.status() : 0}`);
+
+    // STEP 3: POST auth/status (MUST BE POST, not GET)
+    const statusR = await apiCall('POST', '/v1/api/iserver/auth/status');
+    const statusBody = statusR ? await statusR.text() : '';
+    console.log(`   auth/status: ${statusR ? statusR.status() : 0} ${statusBody.substring(0, 200)}`);
+
+    // STEP 4: Warm brokerage session via /iserver/accounts
+    const accts = await apiCall('GET', '/v1/api/iserver/accounts');
+    const acctsBody = accts ? await accts.text() : '';
+    console.log(`   iserver/accounts: ${accts ? accts.status() : 0} ${acctsBody.substring(0, 200)}`);
+
+    // STEP 5: Required once per session
+    const port = await apiCall('GET', '/v1/api/portfolio/accounts');
+    console.log(`   portfolio/accounts: ${port ? port.status() : 0}`);
+
+    // Re-check auth/status after warm-up
+    const statusR2 = await apiCall('POST', '/v1/api/iserver/auth/status');
+    const statusBody2 = statusR2 ? await statusR2.text() : '';
+    console.log(`   auth/status (retry): ${statusR2 ? statusR2.status() : 0} ${statusBody2.substring(0, 200)}`);
+
+    const authenticated = statusBody2.includes('"authenticated":true') || statusBody.includes('"authenticated":true');
 
     // Save session cookies
     const cookies = await context.cookies();
     fs.writeFileSync('/tmp/ibkr-cookies.txt', cookies.map(c => `${c.name}=${c.value}`).join('; '));
     fs.writeFileSync('/tmp/ibkr-session.json', JSON.stringify(await context.storageState()));
 
-    fs.writeFileSync(STATE_FILE, 'authenticated');
-    console.log(`\n✅ Session ${authenticated ? 'API confirmée' : 'SSO active (IServer en cours)'}`);
+    fs.writeFileSync(STATE_FILE, authenticated ? 'authenticated' : 'sso-only');
+    console.log(`\n${authenticated ? '✅ Session API confirmée (authenticated:true)' : '⚠️  SSO OK mais API non auth — bot ne pourra pas trader'}`);
     console.log('   Lancer : npm run nordic:dry\n');
     console.log('   Keepalive actif (tickle/55s) — Ctrl+C pour arrêter');
 
     let failCount = 0;
     while (true) {
       await page.waitForTimeout(55000);
-      const tr = await apiCall(context, 'POST', '/v1/api/tickle');
+      const tr = await apiCall('POST', '/v1/api/tickle');
       const t = tr ? tr.status() : 0;
       const tb = tr ? (await tr.text().catch(() => '')).substring(0, 100) : '';
       console.log(`   Tickle: ${t} ${tb}`);
@@ -164,8 +184,9 @@ async function apiCall(context, method, path) {
       if (t === 401) {
         failCount++;
         if (failCount >= 3) { console.log('   Session expirée (3×401)'); fs.writeFileSync(STATE_FILE, 'expired'); break; }
-        const ra = await apiCall(context, 'POST', '/v1/api/iserver/reauthenticate');
-        console.log(`   Reauthenticate: ${ra ? ra.status() : 0}`);
+        // Try ssodh/init again on 401
+        const ra = await apiCall('POST', '/v1/api/iserver/auth/ssodh/init', { publish: true, compete: true });
+        console.log(`   ssodh/init retry: ${ra ? ra.status() : 0}`);
       } else {
         failCount = 0;
       }
