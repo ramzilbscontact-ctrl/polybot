@@ -24,3 +24,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Python cache
+scripts/backtest/__pycache__/
+scripts/backtest/strategies/__pycache__/
+*.pyc

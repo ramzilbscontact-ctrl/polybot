@@ -11,7 +11,10 @@
     "nordic:dry": "IBKR_DRY_RUN=true ts-node --transpile-only src/nordic/NordicMain.ts",
     "setup": "ts-node --transpile-only setup.ts",
     "build": "tsc",
-    "test": "echo \"No tests configured yet\" && exit 0"
+    "test": "echo \"No tests configured yet\" && exit 0",
+    "backtest": "python3 scripts/backtest/run.py",
+    "backtest:optimize": "python3 scripts/backtest/run.py --optimize",
+    "backtest:full": "python3 scripts/backtest/run.py --symbols SPY QQQ AAPL MSFT NVDA TSLA --start 2022-01-01"
   },
   "keywords": [
     "polymarket",
