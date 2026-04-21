@@ -7,7 +7,7 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') }
 const { chromium } = require('playwright');
 const fs = require('fs');
 
-const GATEWAY    = process.env.IBKR_GATEWAY_URL || 'https://localhost:5000';
+const GATEWAY    = process.env.IBKR_GATEWAY_URL || 'https://127.0.0.1:5000';
 const USERNAME   = process.env.IBKR_USERNAME    || '';
 const PASSWORD   = process.env.IBKR_PASSWORD    || '';
 const CODE_FILE  = '/tmp/ibkr-2fa-code';
