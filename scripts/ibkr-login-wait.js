@@ -47,59 +47,82 @@ function waitForFile(f, ms = 300000) {
     await page.goto(`${GATEWAY}/sso/Login?forwardTo=22&RL=1&ip2loc=EU`, {
       waitUntil: 'domcontentloaded', timeout: 45000,
     });
+    // Wait for React to render the form (JS-rendered, needs time after DOMContentLoaded)
+    await page.waitForTimeout(6000);
     await page.waitForSelector('#xyz-field-username', { timeout: 30000 });
     console.log('   Page chargée');
 
-    // Fill credentials first (triggers React onChange)
-    console.log('▶ Saisie identifiants...');
-    await page.locator('#xyz-field-username').fill(USERNAME);
-    await page.locator('#xyz-field-password').fill(PASSWORD);
+    // Login with LIVE account (ramzilebs) — IB Key is configured on the live account.
+    // After auth, we select DUP564236 (paper) via API for trading.
+    const LIVE_USER = process.env.IBKR_LIVE_USERNAME || 'ramzilebs';
+    const LIVE_PASS = process.env.IBKR_LIVE_PASSWORD || PASSWORD;
+
+    console.log('▶ Saisie identifiants LIVE...');
+    await page.locator('#xyz-field-username').fill(LIVE_USER);
+    await page.locator('#xyz-field-password').fill(LIVE_PASS);
 
     const u = await page.locator('#xyz-field-username').inputValue();
     if (!u) throw new Error('Username still empty');
-    console.log(`   Username: "${u}", Password: ${PASSWORD.length} chars`);
-
-    // Switch to Paper mode after filling (fill() committed React state)
-    const toggleVisible = await page.isVisible('.toggle-wrapper', { timeout: 3000 }).catch(() => false);
-    if (toggleVisible) {
-      console.log('▶ Mode Paper...');
-      await page.locator('.toggle-wrapper').click({ force: true });
-      await page.waitForTimeout(1000);
-      const u2 = await page.locator('#xyz-field-username').inputValue();
-      if (!u2) {
-        await page.locator('#xyz-field-username').fill(USERNAME);
-        await page.locator('#xyz-field-password').fill(PASSWORD);
-        console.log('   Refill après toggle');
-      }
-    }
+    console.log(`   Username: "${u}", Password: ${LIVE_PASS.length} chars`);
 
     await page.click('.xyz-button-login');
-    console.log('▶ Credentials soumis — attente 2FA...');
-    await page.waitForTimeout(8000);
-    await page.screenshot({ path: '/tmp/ibkr-2fa-page.png' });
-    console.log('   Screenshot 2FA sauvé: /tmp/ibkr-2fa-page.png');
+    console.log('▶ Credentials soumis — attente page 2FA...');
 
-    // Log visible 2FA elements for debugging
-    const allText = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => '');
-    console.log(`   Page text: ${allText.replace(/\n/g, '|')}`);
+    // Wait for EITHER: push notification block, SMS form, Dispatcher, or error
+    fs.writeFileSync(STATE_FILE, 'waiting-2fa');
+    let twoFaDone = false;
+    try {
+      await page.waitForURL('**/sso/Dispatcher**', { timeout: 5000 });
+      console.log('   Dispatcher atteint directement (pas de 2FA visible)');
+      twoFaDone = true;
+    } catch {}
 
-    // OTP method selector — try to pick push if available
-    const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 2000 }).catch(() => false);
-    if (otpSel) {
-      console.log('   OTP selector visible, clicking...');
-      await page.click('.xyz-otp-select-text');
+    if (!twoFaDone) {
       await page.waitForTimeout(3000);
-      await page.screenshot({ path: '/tmp/ibkr-otp-select.png' });
-    }
+      await page.screenshot({ path: '/tmp/ibkr-2fa-page.png' });
+      const allText = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => '');
+      console.log(`   Page text: ${allText.replace(/\n/g, '|').substring(0, 300)}`);
 
-    // Push notification (tap sur mobile IBKR — plus de code SMS nécessaire)
-    const pushVisible = await page.isVisible('.xyzblock-notification', { timeout: 5000 }).catch(() => false);
-    console.log(`   Push visible: ${pushVisible}`);
-    if (pushVisible) {
-      fs.writeFileSync(STATE_FILE, 'waiting-push');
-      console.log('\n📲 APPROBATION PUSH REQUISE — Ouvrez l\'app IBKR et approuvez\n');
-      await page.waitForSelector('.xyzblock-success, .xyzform-silver', { timeout: 90000 });
-      console.log('   Push approuvé');
+      // OTP method selector
+      const otpSel = await page.isVisible('.xyz-otp-select-text', { timeout: 2000 }).catch(() => false);
+      if (otpSel) {
+        await page.click('.xyz-otp-select-text');
+        await page.waitForTimeout(2000);
+      }
+
+      // IB Key push notification — multiple possible selectors
+      const pushSelectors = ['.xyzblock-notification', '[class*="notification"]', '[class*="push"]', '[class*="ibkey"]'];
+      let pushVisible = false;
+      for (const sel of pushSelectors) {
+        pushVisible = await page.isVisible(sel, { timeout: 2000 }).catch(() => false);
+        if (pushVisible) { console.log(`   Push détecté: ${sel}`); break; }
+      }
+
+      if (pushVisible) {
+        fs.writeFileSync(STATE_FILE, 'waiting-push');
+        console.log('\n📲 APPROBATION PUSH — Approuvez sur votre téléphone IBKR Mobile\n');
+        await page.waitForURL('**/sso/Dispatcher**', { timeout: 120000 });
+        console.log('   Push approuvé ✅');
+      } else {
+        // SMS/Silver code
+        const silverVisible = await page.isVisible('.xyz-silver-response', { timeout: 3000 }).catch(() => false);
+        console.log(`   SMS visible: ${silverVisible}`);
+        if (silverVisible) {
+          await page.screenshot({ path: '/tmp/ibkr-sms-form.png' });
+          fs.writeFileSync(STATE_FILE, 'waiting-2fa');
+          const ts = new Date().toISOString();
+          console.log(`\n📱 CODE 2FA [${ts}] — envoyez : echo "VOTRE_CODE" > /tmp/ibkr-2fa-code\n`);
+          const code = await waitForFile(CODE_FILE, 300000);
+          await page.fill('.xyz-silver-response', code);
+          const submitted = await page.locator('.xyzform-silver button[type="submit"]').click({ timeout: 3000 }).then(() => true).catch(() => false);
+          if (!submitted) await page.locator('button:has-text("Login"), button[type="submit"]').first().click({ timeout: 3000 }).catch(() => {});
+        } else {
+          // No 2FA detected — wait for Dispatcher anyway
+          console.log('   Aucun 2FA détecté — attente Dispatcher 30s...');
+          await page.screenshot({ path: '/tmp/ibkr-2fa-page.png' });
+          await page.waitForURL('**/sso/Dispatcher**', { timeout: 30000 }).catch(() => {});
+        }
+      }
     }
 
     // SMS/email code (Silver OTP)
