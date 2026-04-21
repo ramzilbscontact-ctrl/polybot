@@ -1,0 +1,75 @@
+{
+  "symbol": "SPY",
+  "strategy": "momentum",
+  "period": "2022-01-01 \u2192 2025-12-31",
+  "best_params": {
+    "lookback": 20,
+    "long_only": true
+  },
+  "metrics": {
+    "total_return": 0.38672052312406113,
+    "annual_return": 0.08541217496239373,
+    "sharpe": 0.4419889799494926,
+    "sortino": 0.5173705625067636,
+    "calmar": 0.7296843991919025,
+    "max_drawdown": -0.11705358516227624,
+    "max_dd_duration_days": 134,
+    "var_95": -0.010998123336097176,
+    "cvar_95": -0.01679597955881759,
+    "win_rate": 0.6363636363636364,
+    "profit_factor": 2.5246211765158995,
+    "avg_r": 1.4426406722947995,
+    "num_trades": 33,
+    "avg_trade_pct": 0.013330981402416741,
+    "largest_win": 0.19056194302073215,
+    "largest_loss": -0.06922322960058813,
+    "exposure_time": 0.16467065868263472,
+    "start_date": "2022-01-04",
+    "end_date": "2025-12-31"
+  },
+  "walk_forward": {
+    "num_windows": 28,
+    "is_sharpe_mean": 1.6929037656958488,
+    "oos_sharpe_mean": -0.342143441353104,
+    "oos_sharpe_std": 1.981677805721555,
+    "walk_forward_ratio": -0.2021044836015648,
+    "oos_consistency": 0.25,
+    "oos_return_avg": -0.0005468522793481344,
+    "pass": false
+  },
+  "monte_carlo": {
+    "n_simulations": 1000,
+    "sharpe": {
+      "mean": 0.8352331184773375,
+      "std": 0.48040400668054273,
+      "p5": 0.06407396217885761,
+      "p25": 0.504623746211343,
+      "p50": 0.8286842273022765,
+      "p75": 1.1658295796344849,
+      "p95": 1.6687358856705217
+    },
+    "max_drawdown": {
+      "mean": -0.14683560540911675,
+      "p5": -0.24246217991399174,
+      "p50": -0.13932359447192863,
+      "p95": -0.08420160317375641
+    },
+    "total_return": {
+      "mean": 0.43423453564115927,
+      "p5": 0.0038135845920486493,
+      "p50": 0.40036018005706453,
+      "p95": 0.9860079103616415
+    },
+    "probability_positive_sharpe": 0.964,
+    "probability_sharpe_above_1": 0.355
+  },
+  "decisions": {
+    "basic_pass": false,
+    "basic_reasons": [
+      "Sharpe 0.44 < 0.8"
+    ],
+    "walk_forward_pass": false,
+    "monte_carlo_pass": true,
+    "overall_pass": false
+  }
+}

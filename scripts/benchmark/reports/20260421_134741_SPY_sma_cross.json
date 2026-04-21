@@ -1,0 +1,76 @@
+{
+  "symbol": "SPY",
+  "strategy": "sma_cross",
+  "period": "2022-01-01 \u2192 2025-12-31",
+  "best_params": {
+    "fast": 20,
+    "slow": 200
+  },
+  "metrics": {
+    "total_return": 0.6337723787145952,
+    "annual_return": 0.13095209553298748,
+    "sharpe": 0.8524526394963032,
+    "sortino": 0.9987413765856535,
+    "calmar": 1.2725230272563444,
+    "max_drawdown": -0.10290744664584191,
+    "max_dd_duration_days": 103,
+    "var_95": -0.01141157291474082,
+    "cvar_95": -0.016205949369087785,
+    "win_rate": 1.0,
+    "profit_factor": Infinity,
+    "avg_r": 0,
+    "num_trades": 1,
+    "avg_trade_pct": 0.41975415277472705,
+    "largest_win": 0.41975415277472705,
+    "largest_loss": 0.41975415277472705,
+    "exposure_time": 0.00499001996007984,
+    "start_date": "2022-01-04",
+    "end_date": "2025-12-31"
+  },
+  "walk_forward": {
+    "num_windows": 28,
+    "is_sharpe_mean": 1.3690993314707167,
+    "oos_sharpe_mean": -5.569728382076508e+16,
+    "oos_sharpe_std": 4.562502074187645e+16,
+    "walk_forward_ratio": -4.06816967479882e+16,
+    "oos_consistency": 0.0,
+    "oos_return_avg": 0.0,
+    "pass": false
+  },
+  "monte_carlo": {
+    "n_simulations": 1000,
+    "sharpe": {
+      "mean": 1.2713259051263954,
+      "std": 0.49319637562154567,
+      "p5": 0.48068771398788795,
+      "p25": 0.9359105618174165,
+      "p50": 1.2622950745593429,
+      "p75": 1.6167924687715751,
+      "p95": 2.0773142799485087
+    },
+    "max_drawdown": {
+      "mean": -0.12006732825739116,
+      "p5": -0.19643303055354197,
+      "p50": -0.11146617756617605,
+      "p95": -0.07159998288747421
+    },
+    "total_return": {
+      "mean": 0.6863224910494063,
+      "p5": 0.19228049789245025,
+      "p50": 0.6538824826639076,
+      "p95": 1.2934207682082348
+    },
+    "probability_positive_sharpe": 0.994,
+    "probability_sharpe_above_1": 0.704
+  },
+  "decisions": {
+    "basic_pass": false,
+    "basic_reasons": [
+      "Only 1 trades (need 20+)",
+      "\u26a0\ufe0f  Win rate 100.0% > 95% \u2014 suspicious"
+    ],
+    "walk_forward_pass": false,
+    "monte_carlo_pass": true,
+    "overall_pass": false
+  }
+}

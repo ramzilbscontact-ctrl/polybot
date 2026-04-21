@@ -118,9 +118,13 @@ def _extract_trades(df: pd.DataFrame) -> pd.DataFrame:
 
 def _sharpe(returns: pd.Series, rf: float = 0.0, periods: int = 252) -> float:
     r = returns.dropna()
-    if len(r) < 2 or r.std() == 0:
+    if len(r) < 5 or r.std() < 1e-6:
         return 0.0
-    return float((r.mean() - rf / periods) / r.std() * np.sqrt(periods))
+    s = float((r.mean() - rf / periods) / r.std() * np.sqrt(periods))
+    # Cap extreme values (numerical artefacts)
+    if abs(s) > 10:
+        return 0.0
+    return s
 
 
 def _max_drawdown(equity: pd.Series) -> float:
