@@ -156,10 +156,14 @@ function waitForFile(f, ms = 300000) {
       throw new Error(`Login failed — URL: ${urlDispatcher}`);
     }
 
-    // CRITICAL: Wait for network idle so Dispatcher completes its init
-    console.log('▶ Attente stabilisation Dispatcher...');
+    // CRITICAL: Navigate to /demo to initialize the IServer brokerage session.
+    // The gateway requires this step — without it all /v1/api/* calls return 401.
+    console.log('▶ Navigation vers /demo pour init session brokerage...');
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(3000);
+    await page.goto(`${GATEWAY}/demo`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(5000);
+    console.log(`   URL après /demo : ${page.url()}`);
 
     // Helper for JSON API calls via context.request (shares cookies)
     const apiCall = async (method, path, body) => {
