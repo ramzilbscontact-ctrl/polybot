@@ -11,6 +11,7 @@ Plan complet d'analyse, benchmark, architecture et roadmap pour **maximiser le P
 5. **[04_FEATURE_BREAKDOWN.md](04_FEATURE_BREAKDOWN.md)** — Chaque feature, chaque choix justifié
 6. **[05_BENCHMARK_METHODOLOGY.md](05_BENCHMARK_METHODOLOGY.md)** — Critères Go/No-Go, validation 7 étapes
 7. **[06_IMPLEMENTATION_ROADMAP.md](06_IMPLEMENTATION_ROADMAP.md)** — 16 semaines, jalons, risques
+8. **[07_ANTI_VIBETRADING_FRAMEWORK.md](07_ANTI_VIBETRADING_FRAMEWORK.md)** — ⚠️ Priorité N°1 — Framework Longmore, théorie de l'edge avant tout backtest
 
 ## TL;DR
 
@@ -41,17 +42,19 @@ python scripts/benchmark/run_full_suite.py \
 
 Sortie : rapport `.md` + JSON dans `scripts/benchmark/reports/`, décision GO/NO-GO automatique.
 
-## Les 3 interdictions absolues
+## Les 4 interdictions absolues
 
 1. ❌ **Pas de HFT Nordic/NYSE/NASDAQ** — latence Iowa trop haute
 2. ❌ **Pas de stratégie en live sans passer les 7 étapes de validation** (backtest → walk-forward → MC → paper → live-reduced → live-full)
 3. ❌ **Pas de secrets en `.env` committé** — tous en Secret Manager
+4. ❌ **Pas de backtest sans théorie de l'edge écrite** — répondre à "qui me paye et pourquoi ?" avant tout code (framework Longmore, doc 07)
 
-## Les 3 principes directeurs
+## Les 4 principes directeurs
 
 1. ✅ **Edge structurel > complexité technique** — préférer 5 stratégies simples décorrélées à 1 stratégie sophistiquée
 2. ✅ **Kelly sizing ¼ cap** — maximise croissance log-wealth sans ruine
 3. ✅ **Kill-switch partout** — drawdown 12% = arrêt automatique, pas de discussion
+4. ✅ **Humain → théorie, IA → implémentation** — l'IA ne génère jamais la stratégie, seulement le code qui teste une hypothèse humaine
 
 ---
 

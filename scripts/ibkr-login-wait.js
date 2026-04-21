@@ -165,49 +165,47 @@ function waitForFile(f, ms = 300000) {
     await page.waitForTimeout(5000);
     console.log(`   URL après /demo : ${page.url()}`);
 
-    // Helper for JSON API calls via context.request (shares cookies)
+    // Use page.evaluate() so API calls share the exact browser session (not context.request)
     const apiCall = async (method, path, body) => {
       try {
-        const opts = { headers: { 'Content-Type': 'application/json' } };
-        if (body) opts.data = body;
-        const r = method === 'POST'
-          ? await context.request.post(`${GATEWAY}${path}`, opts)
-          : await context.request.get(`${GATEWAY}${path}`, opts);
-        return r;
-      } catch { return null; }
+        const result = await page.evaluate(async ({ method, path, body }) => {
+          const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include' };
+          if (body) opts.body = JSON.stringify(body);
+          const r = await fetch(path, opts);
+          const text = await r.text();
+          return { status: r.status, body: text };
+        }, { method, path: `/v1/api${path}`, body });
+        return result;
+      } catch (e) { return { status: 0, body: '' }; }
     };
 
-    // STEP 1: Initialize brokerage session (ssodh/init) — this is the MISSING call
-    console.log('▶ Init brokerage session (ssodh/init)...');
-    const init = await apiCall('POST', '/v1/api/iserver/auth/ssodh/init', { publish: true, compete: true });
-    const initBody = init ? await init.text() : '';
-    console.log(`   ssodh/init: ${init ? init.status() : 0} ${initBody.substring(0, 150)}`);
+    // STEP 1: sso/validate
+    const ssoV = await apiCall('GET', '/sso/validate');
+    console.log(`   sso/validate: ${ssoV.status} ${ssoV.body.substring(0, 100)}`);
+
+    // STEP 2: auth/status
+    const statusR = await apiCall('POST', '/iserver/auth/status');
+    console.log(`   auth/status: ${statusR.status} ${statusR.body.substring(0, 200)}`);
     await page.waitForTimeout(3000);
 
-    // STEP 2: SSO validate
-    const ssoV = await apiCall('GET', '/v1/api/sso/validate');
-    console.log(`   sso/validate: ${ssoV ? ssoV.status() : 0}`);
+    // STEP 3: iserver/accounts
+    const accts = await apiCall('GET', '/iserver/accounts');
+    console.log(`   iserver/accounts: ${accts.status} ${accts.body.substring(0, 200)}`);
 
-    // STEP 3: POST auth/status (MUST BE POST, not GET)
-    const statusR = await apiCall('POST', '/v1/api/iserver/auth/status');
-    const statusBody = statusR ? await statusR.text() : '';
-    console.log(`   auth/status: ${statusR ? statusR.status() : 0} ${statusBody.substring(0, 200)}`);
+    // STEP 4: portfolio/accounts
+    const port = await apiCall('GET', '/portfolio/accounts');
+    console.log(`   portfolio/accounts: ${port.status} ${port.body.substring(0, 100)}`);
 
-    // STEP 4: Warm brokerage session via /iserver/accounts
-    const accts = await apiCall('GET', '/v1/api/iserver/accounts');
-    const acctsBody = accts ? await accts.text() : '';
-    console.log(`   iserver/accounts: ${accts ? accts.status() : 0} ${acctsBody.substring(0, 200)}`);
+    // STEP 5: re-check auth/status
+    const statusR2 = await apiCall('POST', '/iserver/auth/status');
+    console.log(`   auth/status (retry): ${statusR2.status} ${statusR2.body.substring(0, 200)}`);
 
-    // STEP 5: Required once per session
-    const port = await apiCall('GET', '/v1/api/portfolio/accounts');
-    console.log(`   portfolio/accounts: ${port ? port.status() : 0}`);
+    const authenticated = statusR2.body.includes('"authenticated":true') || statusR.body.includes('"authenticated":true');
 
-    // Re-check auth/status after warm-up
-    const statusR2 = await apiCall('POST', '/v1/api/iserver/auth/status');
-    const statusBody2 = statusR2 ? await statusR2.text() : '';
-    console.log(`   auth/status (retry): ${statusR2 ? statusR2.status() : 0} ${statusBody2.substring(0, 200)}`);
-
-    const authenticated = statusBody2.includes('"authenticated":true') || statusBody.includes('"authenticated":true');
+    // Save cookies for external use
+    const cookies = await context.cookies();
+    fs.writeFileSync('/tmp/ibkr-cookies.txt', cookies.map(c => `${c.name}=${c.value}`).join('; '));
+    fs.writeFileSync('/tmp/ibkr-session.json', JSON.stringify(await context.storageState()));
 
     // Save session cookies
     const cookies = await context.cookies();
