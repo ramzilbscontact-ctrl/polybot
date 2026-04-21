@@ -4,8 +4,8 @@
       "command": "uvx",
       "args": ["alpaca-mcp-server"],
       "env": {
-        "ALPACA_API_KEY": "REPLACE_WITH_YOUR_KEY_ID",
-        "ALPACA_SECRET_KEY": "REPLACE_WITH_YOUR_SECRET_KEY",
+        "ALPACA_API_KEY": "PKVDZO7MNOQ2WBHMB4IM2CMNLQ",
+        "ALPACA_SECRET_KEY": "B5DeZoCYdMEuSY22bH1fY3SRBJtv6ggf5CrXNUvUUGkH",
         "ALPACA_PAPER": "true"
       }
     }
